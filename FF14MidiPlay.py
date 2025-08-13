@@ -531,7 +531,6 @@ class MidiPlayerUI:
         self.is_playing = True
         self.play_btn.config(text="⏸ PAUSE")
         self.stop_btn.config(state='normal')
-        self.root.iconify()          # バックグラウンドで実行
 
         self.play_thread = threading.Thread(
             target=self.play_sequence, daemon=True)
