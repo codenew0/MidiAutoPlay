@@ -1,0 +1,2 @@
+# MidiAutoPlay
+used for FFXIV
