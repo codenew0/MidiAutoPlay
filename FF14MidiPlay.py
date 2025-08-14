@@ -871,21 +871,21 @@ BPM: {self.midi_info['bpm']}
             pass
 
 def main():
-   root = tk.Tk()
-   app = MidiPlayerUI(root)
-   
-   # ウィンドウ終了時の処理を追加
-   def on_closing():
-       try:
-           app.hotkeys.stop()  # ホットキーを停止
-           app.destroy_overlay_window()  # オーバーレイウィンドウを破棄
-       except:
-           pass
-       root.destroy()
-   
-   root.protocol("WM_DELETE_WINDOW", on_closing)
-   root.mainloop()
+    root = tk.Tk()
+    app = MidiPlayerUI(root)
+    
+    # ウィンドウ終了時の処理を追加
+    def on_closing():
+        try:
+            app.hotkeys.stop()  # ホットキーを停止
+            app.destroy_overlay_window()  # オーバーレイウィンドウを破棄
+        except:
+            pass
+        root.destroy()
+    
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+    root.mainloop()
 
 
 if __name__ == "__main__":
-  main()
+    main()
