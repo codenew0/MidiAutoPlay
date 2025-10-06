@@ -51,9 +51,10 @@ class MidiPlayerUI:
             60: 'q', 61: '2', 62: 'w', 63: '3', 64: 'e', 65: 'r', 66: '5', 67: 't', 68: '6', 69: 'y', 70: '7', 71: 'u',
 
             # オクターブ5-6 (高音域) - C, C#, D, Eb, E, F, F#, G, G#, A, Bb, B, C
-            72: 'i', 73: '9', 74: 'o', 75: '0', 76: 'p', 77: 'l', 78: '-', 79: '@', 80: '^', 81: ';', 82: '\\', 83: '[',
-            84: ':',
-            85: '9', 86: 'o', 87: '0', 88: 'p', 89: 'l', 90: '-', 91: '@', 92: '^', 93: ';', 94: '\\', 95: '[',
+            72: 'i', 73: '9', 74: 'o', 75: '0', 76: 'p', 77: 'l', 78: '-', 79: '`', 80: '\'', 81: '=', 82: '\\', 83: '[',
+            84: ';',
+            85: '9', 86: 'o', 87: '0', 88: 'p', 89: 'l', 90: '-', 91: '`', 92: '\'', 93: '=', 94: '\\', 95: '[',
+            96: ';',
         }
 
         # MIDI番号から音名への変換
@@ -653,6 +654,9 @@ BPM: {self.midi_info['bpm']}
         self.play_thread = threading.Thread(target=self.play_sequence, daemon=True)
         self.play_thread.start()
 
+        self.root.withdraw()   # 完全に非表示（裏のウィンドウが前に出る）
+        self.root.after(100, self.root.iconify)  # タスクバーに戻す
+
         self.log("再生を開始しました。")
 
     def pause_play(self):
@@ -674,6 +678,8 @@ BPM: {self.midi_info['bpm']}
         self.play_btn.config(text="▶ PLAY", state='normal')
         self.stop_btn.config(state='disabled')
         self.progress_var.set(0)
+
+        self.root.deiconify()
         
         # オーバーレイウィンドウを破棄
         self.destroy_overlay_window()
@@ -685,7 +691,7 @@ BPM: {self.midi_info['bpm']}
         try:
             for key in ['z', 's', 'x', 'd', 'c', 'v', 'g', 'b', 'h', 'n', 'j', 'm',
                         'q', '2', 'w', '3', 'e', 'r', '5', 't', '6', 'y', '7', 'u',
-                        'i', '9', 'o', '0', 'p', 'l', '-', '@', '^', ';', '\\', '[', ':']:
+                        'i', '9', 'o', '0', 'p', 'l', '-', '`', '\'', '=', '\\', '[', ';']:
                 try:
                     self.keyboard.release(key)
                 except:
