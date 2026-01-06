@@ -455,75 +455,108 @@ class MidiPlayerUI:
         return info
 
     def convert_to_key_sequence(self, filepath):
-        """MIDIファイルをキーシーケンスに変換"""
+        """MIDIファイルをキーシーケンスに変換（テンポ変化対応版）"""
         mid = mido.MidiFile(filepath)
-
-        events = []
-        current_tempo = 500000
-
-        for track_num, track in enumerate(mid.tracks):
-            current_time = 0
+        
+        # テンポマップを作成（全トラックから収集）
+        tempo_map = []  # (累積tick, tempo)のリスト
+        
+        for track in mid.tracks:
+            current_tick = 0
             for msg in track:
-                current_time += msg.time
-
+                current_tick += msg.time
                 if msg.type == 'set_tempo':
-                    current_tempo = msg.tempo
-                elif msg.type == 'note_on' and msg.velocity > 0:
-                    time_in_seconds = mido.tick2second(current_time, mid.ticks_per_beat, current_tempo)
+                    tempo_map.append((current_tick, msg.tempo))
+        
+        # tick順にソートして重複を削除
+        tempo_map.sort(key=lambda x: x[0])
+        if not tempo_map:
+            tempo_map = [(0, 500000)]  # デフォルトテンポ
+        
+        # tickを秒に変換する関数
+        def tick_to_second(tick):
+            time_sec = 0.0
+            prev_tick = 0
+            current_tempo = tempo_map[0][1]
+            
+            for tempo_tick, tempo in tempo_map:
+                if tick <= tempo_tick:
+                    # 目標tickに到達前
+                    time_sec += mido.tick2second(tick - prev_tick, mid.ticks_per_beat, current_tempo)
+                    return time_sec
+                else:
+                    # このテンポ変化地点まで進む
+                    time_sec += mido.tick2second(tempo_tick - prev_tick, mid.ticks_per_beat, current_tempo)
+                    prev_tick = tempo_tick
+                    current_tempo = tempo
+            
+            # 最後のテンポ変化以降
+            if tick > prev_tick:
+                time_sec += mido.tick2second(tick - prev_tick, mid.ticks_per_beat, current_tempo)
+            
+            return time_sec
+        
+        # 各トラックのイベントを秒に変換
+        events = []
+        
+        for track_num, track in enumerate(mid.tracks):
+            current_tick = 0
+            for msg in track:
+                current_tick += msg.time
+                
+                if msg.type == 'note_on' and msg.velocity > 0:
                     events.append({
-                        'time': time_in_seconds,
+                        'time': tick_to_second(current_tick),
                         'type': 'note_on',
                         'note': msg.note,
                         'velocity': msg.velocity,
                         'track': track_num
                     })
                 elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                    time_in_seconds = mido.tick2second(current_time, mid.ticks_per_beat, current_tempo)
                     events.append({
-                        'time': time_in_seconds,
+                        'time': tick_to_second(current_tick),
                         'type': 'note_off',
                         'note': msg.note,
                         'track': track_num
                     })
-
+        
         events.sort(key=lambda x: x['time'])
-
+        
+        # 以降は既存のコードと同じ
         key_sequence = []
         active_notes = set()
         time_groups = defaultdict(list)
-
-        # イベントを時間でグループ化
+        
         for event in events:
             time_groups[round(event['time'], 3)].append(event)
-
-        # 各時間ポイントでキーイベントを生成
+        
         for current_time in sorted(time_groups.keys()):
             events_at_time = time_groups[current_time]
-
+            
             for event in events_at_time:
                 if event['type'] == 'note_on':
                     active_notes.add(event['note'])
                 elif event['type'] == 'note_off':
                     active_notes.discard(event['note'])
-
+            
             if active_notes:
-               keys = []
-               notes = []
-               for note in sorted(active_notes):
-                   if note in self.note_to_key:
-                       key = self.note_to_key[note]
-                       if key not in keys:
-                           keys.append(key)
-                   notes.append(self.midi_to_note_name(note))
-
-               if keys:
-                   key_sequence.append({
-                       'time': current_time,
-                       'keys': keys,
-                       'notes': notes,
-                       'active_note_count': len(active_notes)
-                   })
-
+                keys = []
+                notes = []
+                for note in sorted(active_notes):
+                    if note in self.note_to_key:
+                        key = self.note_to_key[note]
+                        if key not in keys:
+                            keys.append(key)
+                    notes.append(self.midi_to_note_name(note))
+                
+                if keys:
+                    key_sequence.append({
+                        'time': current_time,
+                        'keys': keys,
+                        'notes': notes,
+                        'active_note_count': len(active_notes)
+                    })
+        
         return key_sequence
 
     def midi_to_note_name(self, midi_number):
@@ -700,7 +733,7 @@ BPM: {self.midi_info['bpm']}
         self.log("再生を停止しました。")
 
     def play_sequence(self):
-        """キーシーケンスを再生 - ミュートされたトラックは再生しない機能を追加"""
+        """キーシーケンスを再生 - テンポ変化対応版"""
         if not self.key_sequence:
             return
 
@@ -708,53 +741,77 @@ BPM: {self.midi_info['bpm']}
         total_duration = self.key_sequence[-1]['time'] if self.key_sequence else 0
         play_start_time = time.time()
 
-        # 現在押されているキーを管理
         currently_pressed = set()
 
         try:
-            # 全てのイベント（note_on と note_off）を時間順で処理
-            all_events = []
-
-            # MIDIファイルから正確なイベントを再取得
+            # MIDIファイルからテンポマップを作成
             mid = mido.MidiFile(self.midi_file)
-            current_tempo = 500000
-
-            for track_num, track in enumerate(mid.tracks):
-                current_time = 0
+            tempo_map = []
+            
+            for track in mid.tracks:
+                current_tick = 0
                 for msg in track:
-                    current_time += msg.time
-
+                    current_tick += msg.time
                     if msg.type == 'set_tempo':
-                        current_tempo = msg.tempo
-                    elif msg.type == 'note_on' and msg.velocity > 0:
-                        # ミュートされたトラックはスキップ
+                        tempo_map.append((current_tick, msg.tempo))
+            
+            tempo_map.sort(key=lambda x: x[0])
+            if not tempo_map:
+                tempo_map = [(0, 500000)]
+            
+            # tickを秒に変換する関数（convert_to_key_sequenceと同じロジック）
+            def tick_to_second(tick):
+                time_sec = 0.0
+                prev_tick = 0
+                current_tempo = tempo_map[0][1]
+                
+                for tempo_tick, tempo in tempo_map:
+                    if tick <= tempo_tick:
+                        time_sec += mido.tick2second(tick - prev_tick, mid.ticks_per_beat, current_tempo)
+                        return time_sec
+                    else:
+                        time_sec += mido.tick2second(tempo_tick - prev_tick, mid.ticks_per_beat, current_tempo)
+                        prev_tick = tempo_tick
+                        current_tempo = tempo
+                
+                if tick > prev_tick:
+                    time_sec += mido.tick2second(tick - prev_tick, mid.ticks_per_beat, current_tempo)
+                
+                return time_sec
+            
+            # 全イベントを再構築（テンポ変化を考慮）
+            all_events = []
+            
+            for track_num, track in enumerate(mid.tracks):
+                current_tick = 0
+                for msg in track:
+                    current_tick += msg.time
+                    
+                    if msg.type == 'note_on' and msg.velocity > 0:
                         if track_num in self.muted_tracks:
                             continue
-                            
-                        time_in_seconds = mido.tick2second(current_time, mid.ticks_per_beat, current_tempo)
+                        
                         all_events.append({
-                            'time': time_in_seconds,
+                            'time': tick_to_second(current_tick),
                             'type': 'press',
                             'note': msg.note,
                             'velocity': msg.velocity,
                             'track': track_num
                         })
                     elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                        # ミュートされたトラックはスキップ
                         if track_num in self.muted_tracks:
                             continue
-                            
-                        time_in_seconds = mido.tick2second(current_time, mid.ticks_per_beat, current_tempo)
+                        
                         all_events.append({
-                            'time': time_in_seconds,
+                            'time': tick_to_second(current_tick),
                             'type': 'release',
                             'note': msg.note,
                             'track': track_num
                         })
-
-            # 時間順にソート
+            
             all_events.sort(key=lambda x: x['time'])
-
+            
+            # 以降は既存のコードと同じ（イベント再生ループ）
             active_tracks = set(range(len(mid.tracks))) - self.muted_tracks
             self.root.after(0, self.log, f"総イベント数: {len(all_events)}個を再生開始 (アクティブトラック: {sorted(active_tracks)})")
 
@@ -762,7 +819,6 @@ BPM: {self.midi_info['bpm']}
                 if not self.is_playing:
                     break
 
-                # 正確な時間まで待機
                 target_time = event['time'] / speed_multiplier
                 elapsed_time = time.time() - play_start_time
                 wait_time = target_time - elapsed_time
@@ -773,7 +829,6 @@ BPM: {self.midi_info['bpm']}
                 if not self.is_playing:
                     break
 
-                # キーマッピングを取得
                 key = self.note_to_key.get(event['note'])
                 if not key:
                     continue
@@ -796,18 +851,14 @@ BPM: {self.midi_info['bpm']}
                         else:
                             action = "ALREADY RELEASED"
 
-                    # 現在の状態を表示
                     pressed_keys = sorted(list(currently_pressed))
                     track_info = f"Track{event['track']}"
                     status_msg = f"{event['time']:.3f}s | {action} {key}({note_name}) [{track_info}] | 現在押下: {' + '.join(pressed_keys) if pressed_keys else 'なし'}"
 
-                    # UIを更新
                     self.root.after(0, self.update_play_status, status_msg)
 
-                    # プログレスバーを更新
                     progress = (event['time'] / total_duration) * 100 if total_duration > 0 else 0
                     self.root.after(0, self.progress_var.set, progress)
-                    # オーバーレイのプログレスバーも更新
                     if self.overlay_window:
                         self.root.after(0, self.overlay_progress_var.set, progress)
 
@@ -822,12 +873,10 @@ BPM: {self.midi_info['bpm']}
                 except:
                     pass
 
-            # 再生完了処理
             if self.is_playing:
                 self.root.after(0, self.on_playback_finished)
 
         except Exception as e:
-            # エラー時も全てのキーを離す
             for key in list(currently_pressed):
                 try:
                     self.keyboard.release(key)
