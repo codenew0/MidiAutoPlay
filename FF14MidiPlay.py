@@ -39,21 +39,24 @@ class MidiPlayerUI:
         # オーバーレイウィンドウ用
         self.overlay_window = None
 
-        # 音符からキーへのマッピング
-        self.note_to_key = {
-            # オクターブ0-2 (低音域) - C, C#, D, D#, E, F, F#, G, G#, A, Bb, B
-            12: '1', 13: '2', 14: '3', 15: '4', 16: '5', 17: '6', 18: '7', 19: '8', 20: '9', 21: '0', 22: 'q', 23: 'w',
-            24: '1', 25: '2', 26: '3', 27: '4', 28: '5', 29: '6', 30: '7', 31: '8', 32: '9', 33: '0', 34: 'q', 35: 'w',
-            36: '1', 37: '2', 38: '3', 39: '4', 40: '5', 41: '6', 42: '7', 43: '8', 44: '9', 45: '0', 46: 'q', 47: 'w',
+        # キーボード範囲の設定（MIDI番号）
+        self.keyboard_min_note = 60  # C4
+        self.keyboard_max_note = 84  # C7
 
-            # オクターブ3-4 (中音域) - C, C#, D, D#, E, F, F#, G, G#, A, Bb, B
-            48: 'e', 49: 'r', 50: 't', 51: 'y', 52: 'u', 53: 'i', 54: 'o', 55: 'p', 56: 'a', 57: 's', 58: 'd', 59: 'f',
+       # 基本的なキーマッピング（C4-C7の範囲、37キー）
+        self.base_note_to_key = {
+            # C4-C5 (48-59) - オクターブ0-2の低音域
+            48: '1', 49: '2', 50: '3', 51: '4', 52: '5', 53: '6', 54: '7', 55: '8', 56: '9', 57: '0', 58: 'q', 59: 'w',
+            
+            # C5-C6 (60-71) - オクターブ3-4の中音域
             60: 'e', 61: 'r', 62: 't', 63: 'y', 64: 'u', 65: 'i', 66: 'o', 67: 'p', 68: 'a', 69: 's', 70: 'd', 71: 'f',
-
-            # オクターブ5-6 (高音域) - C, C#, D, Eb, E, F, F#, G, G#, A, Bb, B, C
-            72: 'g', 73: 'h', 74: 'j', 75: 'k', 76: 'l', 77: 'z', 78: 'x', 79: 'c', 80: 'v', 81: 'b', 82: 'n', 83: 'm', 84: ',',
-            85: 'g', 86: 'h', 87: 'j', 88: 'k', 89: 'l', 90: 'z', 91: 'x', 92: 'c', 93: 'v', 94: 'b', 95: 'n', 96: 'm', 97: ','
+            
+            # C6-C7 (72-84) - オクターブ5-6の高音域
+            72: 'g', 73: 'h', 74: 'j', 75: 'k', 76: 'l', 77: 'z', 78: 'x', 79: 'c', 80: 'v', 81: 'b', 82: 'n', 83: 'm', 84: ','
         }
+
+        # 動的に調整されるマッピング（初期値は基本マッピング）
+        self.note_to_key = self.base_note_to_key.copy()
 
         # MIDI番号から音名への変換
         self.note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'Bb', 'B']
@@ -75,6 +78,10 @@ class MidiPlayerUI:
             49: "String Ensemble 1", 50: "String Ensemble 2", 51: "SynthStrings 1", 52: "SynthStrings 2"
         }
 
+        # オクターブシフト機能の設定
+        self.auto_transpose = tk.BooleanVar(value=False)  # デフォルトでオフ
+        self.current_shift = 0  # 現在適用されているシフト量
+
         # グローバルホットキーの設定
         self.hotkeys = GlobalHotKeys({
             '<ctrl>+<alt>+p': self.hotkey_toggle_play,
@@ -86,12 +93,93 @@ class MidiPlayerUI:
 
         self.create_widgets()
 
+    def analyze_midi_range(self, filepath):
+        """MIDIファイルの音域を分析してオクターブシフトを計算"""
+        mid = mido.MidiFile(filepath)
+        
+        all_notes = []
+        for track in mid.tracks:
+            for msg in track:
+                if msg.type == 'note_on' and msg.velocity > 0:
+                    all_notes.append(msg.note)
+        
+        if not all_notes:
+            return 0  # シフト不要
+        
+        min_note = min(all_notes)
+        max_note = max(all_notes)
+        
+        midi_range = max_note - min_note
+        keyboard_range = self.keyboard_max_note - self.keyboard_min_note  # 36半音
+        
+        self.log(f"音域分析: 元の範囲 {self.midi_to_note_name(min_note)}-{self.midi_to_note_name(max_note)} (幅: {midi_range}半音)")
+        
+        # 曲の音域がキーボード範囲を超える場合
+        if midi_range > keyboard_range:
+            self.log(f"警告: 曲の音域({midi_range}半音)がキーボード範囲({keyboard_range}半音)を超えています")
+            # 可能な限り中央に配置
+            midi_center = (min_note + max_note) / 2
+            keyboard_center = (self.keyboard_min_note + self.keyboard_max_note) / 2
+            shift = round((keyboard_center - midi_center) / 12) * 12
+        else:
+            # 曲全体がキーボード範囲に収まるようにシフト
+            # まず曲の中心をキーボードの中心に合わせる
+            midi_center = (min_note + max_note) / 2
+            keyboard_center = (self.keyboard_min_note + self.keyboard_max_note) / 2
+            shift = round((keyboard_center - midi_center) / 12) * 12
+            
+            # シフト後の範囲を確認
+            shifted_min = min_note + shift
+            shifted_max = max_note + shift
+            
+            # 範囲からはみ出る場合は調整
+            if shifted_min < self.keyboard_min_note:
+                additional_shift = self.keyboard_min_note - shifted_min
+                shift += (additional_shift // 12 + (1 if additional_shift % 12 > 0 else 0)) * 12
+            elif shifted_max > self.keyboard_max_note:
+                additional_shift = shifted_max - self.keyboard_max_note
+                shift -= (additional_shift // 12 + (1 if additional_shift % 12 > 0 else 0)) * 12
+        
+        # 最終確認
+        final_min = min_note + shift
+        final_max = max_note + shift
+        
+        self.log(f"オクターブシフト: {shift//12:+d}オクターブ ({shift:+d}半音)")
+        self.log(f"シフト後の範囲: {self.midi_to_note_name(final_min)}-{self.midi_to_note_name(final_max)}")
+        
+        # 範囲外の音符がある場合は警告
+        if final_min < self.keyboard_min_note or final_max > self.keyboard_max_note:
+            out_of_range_low = max(0, self.keyboard_min_note - final_min)
+            out_of_range_high = max(0, final_max - self.keyboard_max_note)
+            if out_of_range_low > 0:
+                self.log(f"警告: {out_of_range_low}半音が低音側で範囲外です")
+            if out_of_range_high > 0:
+                self.log(f"警告: {out_of_range_high}半音が高音側で範囲外です")
+        
+        return shift
+    
+    def apply_octave_shift(self, shift):
+        """オクターブシフトを適用してキーマッピングを更新"""
+        self.note_to_key = {}
+        
+        for original_note, key in self.base_note_to_key.items():
+            # シフト前の音符に対応するキーを設定
+            shifted_note = original_note - shift
+            if 0 <= shifted_note <= 127:  # MIDI番号の有効範囲
+                self.note_to_key[shifted_note] = key
+        
+        # シフト後の実際の範囲をログ
+        if self.note_to_key:
+            mapped_notes = sorted(self.note_to_key.keys())
+            self.log(f"マッピング範囲: {self.midi_to_note_name(mapped_notes[0])}-{self.midi_to_note_name(mapped_notes[-1])} ({len(mapped_notes)}キー)")
+
+
     def create_widgets(self):
-        # メインフレーム 
+        # メインフレーム  
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
-        # ファイル選択部分を拡張してフォルダ選択も追加 
+        # ファイル選択部分を拡張してフォルダ選択も追加  
         file_frame = ttk.LabelFrame(main_frame, text="ファイル/フォルダ選択", padding="10")
         file_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
@@ -106,9 +194,40 @@ class MidiPlayerUI:
         self.browse_folder_btn = ttk.Button(file_frame, text="フォルダ選択", command=self.browse_folder)
         self.browse_folder_btn.grid(row=0, column=2, padx=(0, 5))
 
+        # ★新機能: オクターブシフト設定エリア
+        transpose_frame = ttk.LabelFrame(main_frame, text="音域設定", padding="10")
+        transpose_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.transpose_check = ttk.Checkbutton(
+            transpose_frame, 
+            text="キーボード範囲(C4-C7)に自動調整", 
+            variable=self.auto_transpose,
+            command=self.on_transpose_toggle
+        )
+        self.transpose_check.grid(row=0, column=0, sticky=tk.W, padx=(0, 20))
+        
+        # 現在のシフト状態を表示
+        self.transpose_status_label = ttk.Label(transpose_frame, text="シフト: なし", foreground='blue')
+        self.transpose_status_label.grid(row=0, column=1, sticky=tk.W)
+        
+        # 手動シフトボタン（将来の拡張用）
+        manual_frame = ttk.Frame(transpose_frame)
+        manual_frame.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        
+        ttk.Label(manual_frame, text="手動調整:").grid(row=0, column=0, padx=(0, 5))
+        
+        self.shift_down_btn = ttk.Button(manual_frame, text="▼ -1オクターブ", command=lambda: self.manual_shift(-12), width=15)
+        self.shift_down_btn.grid(row=0, column=1, padx=(0, 5))
+        
+        self.shift_reset_btn = ttk.Button(manual_frame, text="リセット", command=self.reset_shift, width=10)
+        self.shift_reset_btn.grid(row=0, column=2, padx=(0, 5))
+        
+        self.shift_up_btn = ttk.Button(manual_frame, text="▲ +1オクターブ", command=lambda: self.manual_shift(12), width=15)
+        self.shift_up_btn.grid(row=0, column=3)
+
         # プレイリスト表示エリアを新たに追加
         playlist_frame = ttk.LabelFrame(main_frame, text="プレイリスト", padding="10")
-        playlist_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        playlist_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
 
         # プレイリスト用のTreeview
         self.playlist_tree = ttk.Treeview(playlist_frame, columns=('status',), height=6)
@@ -135,7 +254,7 @@ class MidiPlayerUI:
 
         # MIDI情報表示部分
         info_frame = ttk.LabelFrame(main_frame, text="MIDI情報", padding="10")
-        info_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        info_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
 
         # 基本情報
         basic_frame = ttk.Frame(info_frame)
@@ -175,13 +294,13 @@ class MidiPlayerUI:
 
         # 再生コントロール部分
         control_frame = ttk.LabelFrame(main_frame, text="再生コントロール (ショートカット: Ctrl+Alt+P=再生/停止, Ctrl+Alt+S=停止, Ctrl+←/→=前/次)", padding="10")
-        control_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        control_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         # 再生ボタン
         self.play_btn = ttk.Button(control_frame, text="▶ PLAY", command=self.toggle_play, state='disabled')
         self.play_btn.grid(row=0, column=0, padx=(0, 10))
 
-        self.stop_btn = ttk.Button(control_frame, text="⏹ STOP", command=self.stop_play, state='disabled')
+        self.stop_btn = ttk.Button(control_frame, text="■ STOP", command=self.stop_play, state='disabled')
         self.stop_btn.grid(row=0, column=1, padx=(0, 10))
 
         # 速度調整
@@ -202,7 +321,7 @@ class MidiPlayerUI:
 
         # 現在の状態表示
         status_frame = ttk.Frame(main_frame)
-        status_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        status_frame.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E))
 
         self.status_text = scrolledtext.ScrolledText(status_frame, height=8, width=80, wrap=tk.WORD)
         self.status_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -211,8 +330,8 @@ class MidiPlayerUI:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(1, weight=1)
         main_frame.rowconfigure(2, weight=1)
+        main_frame.rowconfigure(3, weight=1)
         info_frame.columnconfigure(0, weight=1)
         info_frame.rowconfigure(1, weight=1)
         track_frame.columnconfigure(0, weight=1)
@@ -222,6 +341,57 @@ class MidiPlayerUI:
         status_frame.rowconfigure(0, weight=1)
         playlist_frame.columnconfigure(0, weight=1)
         playlist_frame.rowconfigure(0, weight=1)
+
+    def on_transpose_toggle(self):
+        """オクターブシフトのオン/オフが切り替えられた時の処理"""
+        if self.midi_file:
+            self.log("音域設定を変更しました。ファイルを再解析します...")
+            self.analyze_file()
+
+    def manual_shift(self, semitones):
+        """手動でオクターブシフトを調整"""
+        self.current_shift += semitones
+        self.log(f"手動シフト: {self.current_shift//12:+d}オクターブ ({self.current_shift:+d}半音)")
+        
+        if self.midi_file:
+            # 自動調整をオフにして手動シフトを適用
+            self.auto_transpose.set(False)
+            self.apply_octave_shift(self.current_shift)
+            
+            # キーシーケンスを再生成
+            self.key_sequence = self.convert_to_key_sequence(self.midi_file)
+            self.update_transpose_status()
+            self.log(f"手動調整完了：{len(self.key_sequence)}個のキーイベント")
+
+    def reset_shift(self):
+        """シフトをリセット"""
+        self.current_shift = 0
+        self.log("シフトをリセットしました")
+        
+        if self.midi_file:
+            if self.auto_transpose.get():
+                # 自動調整の場合は再解析
+                self.analyze_file()
+            else:
+                # 手動調整の場合はシフトなしで適用
+                self.apply_octave_shift(0)
+                self.key_sequence = self.convert_to_key_sequence(self.midi_file)
+                self.update_transpose_status()
+
+    def update_transpose_status(self):
+        """トランスポーズ状態の表示を更新"""
+        if self.auto_transpose.get():
+            status_text = f"自動調整: {self.current_shift//12:+d}オクターブ ({self.current_shift:+d}半音)"
+            color = 'blue'
+        else:
+            if self.current_shift == 0:
+                status_text = "元のメジャー"
+                color = 'green'
+            else:
+                status_text = f"手動調整: {self.current_shift//12:+d}オクターブ ({self.current_shift:+d}半音)"
+                color = 'orange'
+        
+        self.transpose_status_label.config(text=status_text, foreground=color)
 
     def browse_file(self):
         """ファイル選択ダイアログを開く"""
@@ -389,6 +559,21 @@ class MidiPlayerUI:
 
         try:
             self.log("MIDIファイルを解析中...")
+            
+            # 自動調整が有効な場合のみオクターブシフトを計算
+            if self.auto_transpose.get():
+                octave_shift = self.analyze_midi_range(self.midi_file)
+                self.current_shift = octave_shift
+            else:
+                # 自動調整が無効な場合はシフトなし
+                octave_shift = 0
+                self.current_shift = 0
+                self.log("元のメジャーで再生します（シフトなし）")
+            
+            # シフトを適用
+            self.apply_octave_shift(octave_shift)
+            
+            # 残りの解析処理
             self.midi_info = self.analyze_midi_file(self.midi_file)
             self.key_sequence = self.convert_to_key_sequence(self.midi_file)
             
@@ -397,9 +582,10 @@ class MidiPlayerUI:
 
             self.display_midi_info()
             self.display_track_info()
+            self.update_transpose_status()
 
             self.play_btn.config(state='normal')
-            self.log(f"解析完了！{len(self.key_sequence)}個のキーイベントが見つかりました。")
+            self.log(f"解析完了：{len(self.key_sequence)}個のキーイベントが見つかりました。")
 
         except Exception as e:
             messagebox.showerror("エラー", f"ファイル解析中にエラーが発生しました:\n{str(e)}")
@@ -566,9 +752,16 @@ class MidiPlayerUI:
         return f"{note}{octave}"
 
     def display_midi_info(self):
-        """MIDI基本情報を表示"""
+        """MIDI基本情報を表示（音域情報を追加）"""
         if not self.midi_info:
-           return
+            return
+
+        # 実際にマッピングされている音域を表示
+        mapped_notes = sorted(self.note_to_key.keys())
+        if mapped_notes:
+            note_range = f"{self.midi_to_note_name(mapped_notes[0])}-{self.midi_to_note_name(mapped_notes[-1])}"
+        else:
+            note_range = "なし"
 
         info_text = f"""ファイル名: {self.midi_info['filename']}
 フォーマット: Type {self.midi_info['format']}
@@ -577,10 +770,12 @@ BPM: {self.midi_info['bpm']}
 トラック数: {self.midi_info['track_count']}
 時間分解能: {self.midi_info['ticks_per_beat']} ticks/beat
 キーイベント数: {len(self.key_sequence)}
+対応音域: {note_range} (C4-C7キーボード)
 """
 
         self.info_text.delete(1.0, tk.END)
         self.info_text.insert(1.0, info_text)
+
 
     def display_track_info(self):
         """トラック情報を表示"""
