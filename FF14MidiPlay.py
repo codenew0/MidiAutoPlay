@@ -3,12 +3,9 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 import mido
 import threading
 import time
-import json
-from typing import Dict, List
 import os
 from collections import defaultdict
-import pynput
-from pynput.keyboard import Key, Controller, GlobalHotKeys
+from pynput.keyboard import Controller, GlobalHotKeys
 import glob
 
 class MidiPlayerUI:
