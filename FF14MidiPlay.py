@@ -12,7 +12,21 @@ class MidiPlayerUI:
     def __init__(self, root):
         self.root = root
         self.root.title("MIDI to Keys Player")
-        self.root.geometry("1200x800")
+        
+        # ウィンドウサイズを設定
+        window_width = 600
+        window_height = 800
+        
+        # 画面のサイズを取得
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        # 中央の座標を計算
+        x = (screen_width // 2) - (window_width // 2)
+        y = (screen_height // 2) - (window_height // 2)
+        
+        # ウィンドウサイズと位置を設定
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
         self.root.configure(bg='#f0f0f0')
 
         # キーボードコントローラー
@@ -24,6 +38,10 @@ class MidiPlayerUI:
         self.key_sequence = []
         self.is_playing = False
         self.play_thread = None
+
+        # 再生位置を記録する変数を追加
+        self.current_event_index = 0  # 現在の再生位置
+        self.pause_time = 0  # 一時停止時の時間
         
         # プレイリスト機能用の新しい変数
         self.playlist = []  # ファイルパスのリスト
@@ -231,7 +249,7 @@ class MidiPlayerUI:
         self.playlist_tree.heading('#0', text='ファイル名')
         self.playlist_tree.heading('status', text='状態')
         self.playlist_tree.column('#0', width=400)
-        self.playlist_tree.column('status', width=100)
+        self.playlist_tree.column('status', width=50)
         self.playlist_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
         # プレイリスト用スクロールバー
@@ -274,8 +292,8 @@ class MidiPlayerUI:
         self.track_tree.heading('muted', text='ミュート')
 
         self.track_tree.column('#0', width=80)
-        self.track_tree.column('name', width=150)
-        self.track_tree.column('instrument', width=200)
+        self.track_tree.column('name', width=80)
+        self.track_tree.column('instrument', width=100)
         self.track_tree.column('notes', width=80)
         self.track_tree.column('duration', width=80)
         self.track_tree.column('muted', width=80)
@@ -454,55 +472,7 @@ class MidiPlayerUI:
             if i == self.current_playlist_index:
                 self.playlist_tree.selection_set(item)
                 self.playlist_tree.focus(item)
-
-    def play_next(self):
-        """次の曲を再生"""
-        if not self.playlist:
-            return
-            
-        # 現在再生中なら停止
-        if self.is_playing:
-            self.stop_play()
-            
-        # 次の曲のインデックスを計算（最後の曲の場合は最初に戻る）
-        self.current_playlist_index = (self.current_playlist_index + 1) % len(self.playlist)
-        self.midi_file = self.playlist[self.current_playlist_index]
-        self.file_path_var.set(self.midi_file)
-        
-        # プレイリスト表示を更新
-        self.update_playlist_display()
-        
-        # 新しい曲を解析して再生開始
-        self.analyze_file()
-        if self.key_sequence:
-            self.start_play()
-            
-        self.log(f"次の曲: {os.path.basename(self.midi_file)}")
-
-    def play_previous(self):
-        """前の曲を再生"""
-        if not self.playlist:
-            return
-            
-        # 現在再生中なら停止
-        if self.is_playing:
-            self.stop_play()
-            
-        # 前の曲のインデックスを計算（最初の曲の場合は最後に行く）
-        self.current_playlist_index = (self.current_playlist_index - 1) % len(self.playlist)
-        self.midi_file = self.playlist[self.current_playlist_index]
-        self.file_path_var.set(self.midi_file)
-        
-        # プレイリスト表示を更新
-        self.update_playlist_display()
-        
-        # 新しい曲を解析して再生開始
-        self.analyze_file()
-        if self.key_sequence:
-            self.start_play()
-            
-        self.log(f"前の曲: {os.path.basename(self.midi_file)}")
-
+                
     def on_track_double_click(self, event):
         """トラックダブルクリック時のミュート切り替え処理"""
         # クリックされた項目を取得
@@ -601,9 +571,47 @@ class MidiPlayerUI:
             'tracks': []
         }
 
+        # ★ テンポ変化を全て記録してBPMの平均値を計算
+        tempo_changes = []  # (時間, テンポ, BPM)のリスト
         current_tempo = 500000
         current_bpm = 120
 
+        # まず全トラックからテンポ変化を収集
+        for track in mid.tracks:
+            current_tick = 0
+            for msg in track:
+                current_tick += msg.time
+                if msg.type == 'set_tempo':
+                    time_sec = mido.tick2second(current_tick, mid.ticks_per_beat, current_tempo)
+                    current_tempo = msg.tempo
+                    current_bpm = mido.tempo2bpm(current_tempo)
+                    tempo_changes.append((time_sec, current_tempo, current_bpm))
+
+        # テンポ変化がない場合はデフォルト値
+        if not tempo_changes:
+            tempo_changes.append((0, 500000, 120))
+
+        # 時間でソート
+        tempo_changes.sort(key=lambda x: x[0])
+
+        # 各テンポ区間の長さを計算して加重平均を求める
+        total_time = mid.length
+        weighted_bpm_sum = 0
+        
+        for i, (time_sec, tempo, bpm) in enumerate(tempo_changes):
+            # 次のテンポ変化までの時間（最後の場合は曲の終わりまで）
+            if i + 1 < len(tempo_changes):
+                duration = tempo_changes[i + 1][0] - time_sec
+            else:
+                duration = total_time - time_sec
+            
+            # 加重平均に追加
+            weighted_bpm_sum += bpm * duration
+
+        # 平均BPMを計算
+        average_bpm = weighted_bpm_sum / total_time if total_time > 0 else tempo_changes[0][2]
+
+        # トラック情報を収集
         for i, track in enumerate(mid.tracks):
             track_info = {
                 'track_number': i,
@@ -615,12 +623,13 @@ class MidiPlayerUI:
             }
 
             current_time = 0
+            current_tempo = 500000  # トラックごとのテンポ追跡
+            
             for msg in track:
                 current_time += msg.time
 
                 if msg.type == 'set_tempo':
                     current_tempo = msg.tempo
-                    current_bpm = mido.tempo2bpm(current_tempo)
                 elif msg.type == 'track_name':
                     track_info['name'] = msg.name
                 elif msg.type == 'program_change':
@@ -634,7 +643,10 @@ class MidiPlayerUI:
             track_info['instruments'] = list(track_info['instruments'])
             info['tracks'].append(track_info)
 
-        info['bpm'] = round(current_bpm, 2)
+        # ★ 平均BPMを保存
+        info['bpm'] = round(average_bpm, 2)
+        info['bpm_changes'] = len(tempo_changes)  # テンポ変化の回数も記録
+        
         return info
 
     def convert_to_key_sequence(self, filepath):
@@ -760,22 +772,26 @@ class MidiPlayerUI:
         else:
             note_range = "なし"
 
+        # ★ BPM表示にテンポ変化情報を追加
+        bpm_info = f"{self.midi_info['bpm']}"
+        if self.midi_info.get('bpm_changes', 1) > 1:
+            bpm_info += f" (平均, {self.midi_info['bpm_changes']}回変化)"
+
         info_text = f"""ファイル名: {self.midi_info['filename']}
 フォーマット: Type {self.midi_info['format']}
-BPM: {self.midi_info['bpm']}
+BPM: {bpm_info}
 総時間: {self.midi_info['total_time']:.2f} 秒
 トラック数: {self.midi_info['track_count']}
 時間分解能: {self.midi_info['ticks_per_beat']} ticks/beat
 キーイベント数: {len(self.key_sequence)}
 対応音域: {note_range} (C4-C7キーボード)
-"""
+    """
 
         self.info_text.delete(1.0, tk.END)
         self.info_text.insert(1.0, info_text)
 
-
     def display_track_info(self):
-        """トラック情報を表示"""
+        """トラック情報を表示（音符があるトラックのみ）"""
         if not self.midi_info:
             return
 
@@ -783,10 +799,15 @@ BPM: {self.midi_info['bpm']}
         for item in self.track_tree.get_children():
             self.track_tree.delete(item)
 
-        # トラック情報を追加
+        # トラック情報を追加（★音符があるトラックのみ）
+        displayed_tracks = 0
         for track in self.midi_info['tracks']:
+            # ★音符がないトラックはスキップ
+            if not track['has_notes'] or track['note_count'] == 0:
+                continue
+            
             instruments_str = ', '.join(track['instruments']) if track['instruments'] else 'なし'
-            notes_str = str(track['note_count']) if track['has_notes'] else '0'
+            notes_str = str(track['note_count'])
             muted_str = "MUTED" if track['track_number'] in self.muted_tracks else "ON"
 
             self.track_tree.insert('', 'end',
@@ -796,9 +817,27 @@ BPM: {self.midi_info['bpm']}
                                             notes_str,
                                             f"{track['duration']:.2f}",
                                             muted_str))
+            displayed_tracks += 1
+        
+        # ★表示されたトラック数をログに記録
+        self.log(f"音符を含むトラック: {displayed_tracks}/{self.midi_info['track_count']}個")
+
+    def destroy_overlay_window(self):
+        """オーバーレイウィンドウを破棄"""
+        if self.overlay_window:
+            try:
+                if self.overlay_window.winfo_exists():
+                    self.overlay_window.destroy()
+            except:
+                pass
+            finally:
+                self.overlay_window = None
 
     def create_overlay_window(self):
         """オーバーレイウィンドウを作成"""
+        # 既存のウィンドウがあれば先に破棄
+        self.destroy_overlay_window()
+        
         self.overlay_window = tk.Toplevel(self.root)
         self.overlay_window.title("MIDI Player - Playing")
         self.overlay_window.geometry("400x150")
@@ -807,6 +846,9 @@ BPM: {self.midi_info['bpm']}
         
         # ウィンドウを画面の右上に配置
         self.overlay_window.geometry("+{}+50".format(self.root.winfo_screenwidth() - 450))
+        
+        # ウィンドウが閉じられた時の処理を追加
+        self.overlay_window.protocol("WM_DELETE_WINDOW", self.stop_play)
         
         # オーバーレイのコンテンツ
         overlay_frame = ttk.Frame(self.overlay_window, padding="20")
@@ -842,12 +884,6 @@ BPM: {self.midi_info['bpm']}
             filename = os.path.basename(self.midi_file)
             self.overlay_file_label.config(text=f"♪ {filename}")
 
-    def destroy_overlay_window(self):
-        """オーバーレイウィンドウを破棄"""
-        if self.overlay_window:
-            self.overlay_window.destroy()
-            self.overlay_window = None
-
     def toggle_play(self):
         """再生/一時停止を切り替える"""
         if not self.key_sequence:
@@ -868,8 +904,15 @@ BPM: {self.midi_info['bpm']}
         self.play_btn.config(text="⏸ PAUSE")
         self.stop_btn.config(state='normal')
         
-        # オーバーレイウィンドウを作成
-        self.create_overlay_window()
+        # オーバーレイウィンドウが既に存在する場合は作成しない
+        if not self.overlay_window or not self.overlay_window.winfo_exists():
+            self.create_overlay_window()
+        else:
+            # 既存のオーバーレイウィンドウを更新
+            if self.midi_file:
+                filename = os.path.basename(self.midi_file)
+                self.overlay_file_label.config(text=f"♪ {filename}")
+            self.overlay_play_btn.config(text="⏸ 停止")
         
         # プレイリスト表示を更新
         self.update_playlist_display()
@@ -877,10 +920,16 @@ BPM: {self.midi_info['bpm']}
         self.play_thread = threading.Thread(target=self.play_sequence, daemon=True)
         self.play_thread.start()
 
-        self.root.withdraw()   # 完全に非表示（裏のウィンドウが前に出る）
-        self.root.after(100, self.root.iconify)  # タスクバーに戻す
+        # ウィンドウの最小化処理もオーバーレイが新規作成された時のみ
+        if self.root.state() == 'normal':
+            self.root.withdraw()
+            self.root.after(100, self.root.iconify)
 
-        self.log("再生を開始しました。")
+        # 最初からの再生か、途中からの再生かを表示
+        if self.current_event_index == 0:
+            self.log("再生を開始しました。")
+        else:
+            self.log(f"再生を再開しました。(位置: {self.current_event_index})")
 
     def pause_play(self):
         """再生を一時停止"""
@@ -888,21 +937,29 @@ BPM: {self.midi_info['bpm']}
         self.play_btn.config(text="▶ PLAY")
         
         # オーバーレイのボタンも更新
-        if self.overlay_window:
+        if self.overlay_window and self.overlay_window.winfo_exists():
             self.overlay_play_btn.config(text="▶ 再生")
         
         # プレイリスト表示を更新
         self.update_playlist_display()
-        self.log("再生を一時停止しました。")
+        self.log(f"再生を一時停止しました。(位置: {self.current_event_index})")
 
     def stop_play(self):
         """再生を停止"""
+        was_playing = self.is_playing
+        
         self.is_playing = False
         self.play_btn.config(text="▶ PLAY", state='normal')
         self.stop_btn.config(state='disabled')
         self.progress_var.set(0)
+        
+        # 再生位置をリセット
+        self.current_event_index = 0
+        self.pause_time = 0
 
-        self.root.deiconify()
+        # メインウィンドウを表示
+        if self.root.state() != 'normal':
+            self.root.deiconify()
         
         # オーバーレイウィンドウを破棄
         self.destroy_overlay_window()
@@ -911,16 +968,17 @@ BPM: {self.midi_info['bpm']}
         self.update_playlist_display()
 
         # 念のため全てのキーを離す
-        try:
-            for key in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'q', 'w',
-                        'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'a', 's', 'd', 'f',
-                        'g', 'h', 'j', 'k', 'l', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',']:
-                try:
-                    self.keyboard.release(key)
-                except:
-                    pass
-        except:
-            pass
+        if was_playing:
+            try:
+                for key in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'q', 'w',
+                            'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'a', 's', 'd', 'f',
+                            'g', 'h', 'j', 'k', 'l', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',']:
+                    try:
+                        self.keyboard.release(key)
+                    except:
+                        pass
+            except:
+                pass
 
         self.log("再生を停止しました。")
 
@@ -931,8 +989,7 @@ BPM: {self.midi_info['bpm']}
 
         speed_multiplier = self.speed_var.get()
         total_duration = self.key_sequence[-1]['time'] if self.key_sequence else 0
-        play_start_time = time.time()
-
+        
         currently_pressed = set()
 
         try:
@@ -951,7 +1008,6 @@ BPM: {self.midi_info['bpm']}
             if not tempo_map:
                 tempo_map = [(0, 500000)]
             
-            # tickを秒に変換する関数（convert_to_key_sequenceと同じロジック）
             def tick_to_second(tick):
                 time_sec = 0.0
                 prev_tick = 0
@@ -971,7 +1027,7 @@ BPM: {self.midi_info['bpm']}
                 
                 return time_sec
             
-            # 全イベントを再構築（テンポ変化を考慮）
+            # 全イベントを再構築
             all_events = []
             
             for track_num, track in enumerate(mid.tracks):
@@ -1003,14 +1059,26 @@ BPM: {self.midi_info['bpm']}
             
             all_events.sort(key=lambda x: x['time'])
             
-            # 以降は既存のコードと同じ（イベント再生ループ）
             active_tracks = set(range(len(mid.tracks))) - self.muted_tracks
-            self.root.after(0, self.log, f"総イベント数: {len(all_events)}個を再生開始 (アクティブトラック: {sorted(active_tracks)})")
+            
+            # 再開位置からの開始時刻を計算
+            if self.current_event_index > 0 and self.current_event_index < len(all_events):
+                start_time_offset = all_events[self.current_event_index]['time']
+                self.root.after(0, self.log, f"位置 {self.current_event_index}/{len(all_events)} から再開 ({start_time_offset:.2f}秒)")
+            else:
+                start_time_offset = 0
+                self.current_event_index = 0
+            
+            play_start_time = time.time() - (start_time_offset / speed_multiplier)
 
-            for i, event in enumerate(all_events):
+            # current_event_index から再生を開始
+            for i in range(self.current_event_index, len(all_events)):
                 if not self.is_playing:
+                    # 一時停止の場合は現在位置を保存
+                    self.current_event_index = i
                     break
 
+                event = all_events[i]
                 target_time = event['time'] / speed_multiplier
                 elapsed_time = time.time() - play_start_time
                 wait_time = target_time - elapsed_time
@@ -1019,6 +1087,7 @@ BPM: {self.midi_info['bpm']}
                     time.sleep(wait_time)
 
                 if not self.is_playing:
+                    self.current_event_index = i
                     break
 
                 key = self.note_to_key.get(event['note'])
@@ -1065,7 +1134,9 @@ BPM: {self.midi_info['bpm']}
                 except:
                     pass
 
-            if self.is_playing:
+            # 最後まで再生した場合のみ、次の曲へ進む
+            if self.is_playing and self.current_event_index >= len(all_events) - 1:
+                self.current_event_index = 0  # 位置をリセット
                 self.root.after(0, self.on_playback_finished)
 
         except Exception as e:
@@ -1076,6 +1147,88 @@ BPM: {self.midi_info['bpm']}
                     pass
             self.root.after(0, self.log, f"再生中にエラーが発生しました: {str(e)}")
             self.root.after(0, self.stop_play)
+
+    def play_next(self):
+        """次の曲を再生"""
+        if not self.playlist:
+            return
+            
+        # 現在再生中なら停止（オーバーレイは維持）
+        was_playing = self.is_playing
+        if self.is_playing:
+            self.is_playing = False
+            # キーを全て離す
+            try:
+                for key in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'q', 'w',
+                            'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'a', 's', 'd', 'f',
+                            'g', 'h', 'j', 'k', 'l', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',']:
+                    try:
+                        self.keyboard.release(key)
+                    except:
+                        pass
+            except:
+                pass
+        
+        # 再生位置をリセット
+        self.current_event_index = 0
+        
+        # 次の曲のインデックスを計算(最後の曲の場合は最初に戻る)
+        self.current_playlist_index = (self.current_playlist_index + 1) % len(self.playlist)
+        self.midi_file = self.playlist[self.current_playlist_index]
+        self.file_path_var.set(self.midi_file)
+        
+        # プレイリスト表示を更新
+        self.update_playlist_display()
+        
+        # 新しい曲を解析
+        self.analyze_file()
+        
+        self.log(f"次の曲: {os.path.basename(self.midi_file)}")
+        
+        # 自動的に再生開始
+        if self.key_sequence and was_playing:
+            self.start_play()
+
+    def play_previous(self):
+        """前の曲を再生"""
+        if not self.playlist:
+            return
+            
+        # 現在再生中なら停止（オーバーレイは維持）
+        was_playing = self.is_playing
+        if self.is_playing:
+            self.is_playing = False
+            # キーを全て離す
+            try:
+                for key in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'q', 'w',
+                            'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'a', 's', 'd', 'f',
+                            'g', 'h', 'j', 'k', 'l', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',']:
+                    try:
+                        self.keyboard.release(key)
+                    except:
+                        pass
+            except:
+                pass
+        
+        # 再生位置をリセット
+        self.current_event_index = 0
+        
+        # 前の曲のインデックスを計算(最初の曲の場合は最後に行く)
+        self.current_playlist_index = (self.current_playlist_index - 1) % len(self.playlist)
+        self.midi_file = self.playlist[self.current_playlist_index]
+        self.file_path_var.set(self.midi_file)
+        
+        # プレイリスト表示を更新
+        self.update_playlist_display()
+        
+        # 新しい曲を解析
+        self.analyze_file()
+        
+        self.log(f"前の曲: {os.path.basename(self.midi_file)}")
+        
+        # 自動的に再生開始
+        if self.key_sequence and was_playing:
+            self.start_play()
 
     def on_playback_finished(self):
         """再生完了時の処理 - 自動で次の曲に進む"""
@@ -1134,3 +1287,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
