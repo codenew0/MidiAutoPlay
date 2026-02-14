@@ -308,15 +308,15 @@ class MidiPlayerUI:
         self.track_tree.configure(yscrollcommand=track_scrollbar.set)
 
         # 再生コントロール部分
-        control_frame = ttk.LabelFrame(main_frame, text="再生コントロール (ショートカット: Ctrl+Alt+P=再生/停止, Ctrl+Alt+S=停止, Ctrl+←/→=前/次)", padding="10")
+        control_frame = ttk.LabelFrame(main_frame, text="再生コントロール (ショートカット: Ctrl+Alt+P=再生/停止, Ctrl+Alt+S=リセット, Ctrl+←/→=前/次)", padding="10")
         control_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         # 再生ボタン
         self.play_btn = ttk.Button(control_frame, text="▶ PLAY", command=self.toggle_play, state='disabled')
         self.play_btn.grid(row=0, column=0, padx=(0, 10))
 
-        self.stop_btn = ttk.Button(control_frame, text="■ STOP", command=self.stop_play, state='disabled')
-        self.stop_btn.grid(row=0, column=1, padx=(0, 10))
+        self.reset_btn = ttk.Button(control_frame, text="↺ RESET", command=self.reset_play, state='disabled')
+        self.reset_btn.grid(row=0, column=1, padx=(0, 10))
 
         # 速度調整
         ttk.Label(control_frame, text="速度:").grid(row=0, column=2, padx=(20, 5))
@@ -508,8 +508,8 @@ class MidiPlayerUI:
         self.root.after(0, self.toggle_play)
         
     def hotkey_stop(self):
-        """ホットキー: 停止"""
-        self.root.after(0, self.stop_play)
+        """ホットキー: リセット"""
+        self.root.after(0, self.reset_play)
         
     def hotkey_next(self):
         """ホットキー: 次の曲"""
@@ -523,6 +523,13 @@ class MidiPlayerUI:
         """MIDIファイルを解析する（自動実行）"""
         if not self.midi_file:
             return
+
+        # 再生進度をリセット
+        self.current_event_index = 0
+        self.pause_time = 0
+        self.progress_var.set(0)
+        if self.overlay_window and self.overlay_window.winfo_exists():
+            self.overlay_progress_var.set(0)
 
         try:
             self.log("MIDIファイルを解析中...")
@@ -848,7 +855,7 @@ BPM: {bpm_info}
         self.overlay_window.geometry("+{}+50".format(self.root.winfo_screenwidth() - 450))
         
         # ウィンドウが閉じられた時の処理を追加
-        self.overlay_window.protocol("WM_DELETE_WINDOW", self.stop_play)
+        self.overlay_window.protocol("WM_DELETE_WINDOW", self.close_overlay)
         
         # オーバーレイのコンテンツ
         overlay_frame = ttk.Frame(self.overlay_window, padding="20")
@@ -871,7 +878,7 @@ BPM: {bpm_info}
         self.overlay_next_btn = ttk.Button(button_frame, text="次 ▶", command=self.play_next, width=8)
         self.overlay_next_btn.pack(side=tk.LEFT, padx=5)
         
-        self.overlay_stop_btn = ttk.Button(button_frame, text="⏹ 終了", command=self.stop_play, width=8)
+        self.overlay_stop_btn = ttk.Button(button_frame, text="⏹ 終了", command=self.close_overlay, width=8)
         self.overlay_stop_btn.pack(side=tk.LEFT, padx=5)
         
         # プログレスバー
@@ -902,7 +909,7 @@ BPM: {bpm_info}
 
         self.is_playing = True
         self.play_btn.config(text="⏸ PAUSE")
-        self.stop_btn.config(state='normal')
+        self.reset_btn.config(state='normal')
         
         # オーバーレイウィンドウが既に存在する場合は作成しない
         if not self.overlay_window or not self.overlay_window.winfo_exists():
@@ -944,13 +951,63 @@ BPM: {bpm_info}
         self.update_playlist_display()
         self.log(f"再生を一時停止しました。(位置: {self.current_event_index})")
 
+    def close_overlay(self):
+        """オーバーレイウィンドウを閉じてメインウィンドウに戻る（進度は維持）"""
+        # 再生中なら一時停止
+        if self.is_playing:
+            self.pause_play()
+        
+        # メインウィンドウを表示
+        if self.root.state() != 'normal':
+            self.root.deiconify()
+        
+        # オーバーレイウィンドウを破棄
+        self.destroy_overlay_window()
+        
+        # プレイリスト表示を更新
+        self.update_playlist_display()
+        
+        self.log("プレイウィンドウを閉じました。進度は維持されています。")
+
+    def reset_play(self):
+        """再生進度をリセット"""
+        # 再生中なら一時停止
+        was_playing = self.is_playing
+        if self.is_playing:
+            self.is_playing = False
+            # キーを全て離す
+            try:
+                for key in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'q', 'w',
+                            'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'a', 's', 'd', 'f',
+                            'g', 'h', 'j', 'k', 'l', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',']:
+                    try:
+                        self.keyboard.release(key)
+                    except:
+                        pass
+            except:
+                pass
+        
+        # 再生位置をリセット
+        self.current_event_index = 0
+        self.pause_time = 0
+        self.progress_var.set(0)
+        if self.overlay_window and self.overlay_window.winfo_exists():
+            self.overlay_progress_var.set(0)
+        
+        self.play_btn.config(text="▶ PLAY", state='normal')
+        
+        # プレイリスト表示を更新
+        self.update_playlist_display()
+        
+        self.log("再生位置をリセットしました。")
+
     def stop_play(self):
-        """再生を停止"""
+        """再生を停止（内部用 - エラー時など）"""
         was_playing = self.is_playing
         
         self.is_playing = False
         self.play_btn.config(text="▶ PLAY", state='normal')
-        self.stop_btn.config(state='disabled')
+        self.reset_btn.config(state='disabled')
         self.progress_var.set(0)
         
         # 再生位置をリセット
@@ -1134,8 +1191,13 @@ BPM: {bpm_info}
                 except:
                     pass
 
+            # ループが最後まで回った場合、current_event_indexを更新
+            # (breakせずにforが完了した = 最後まで再生された)
+            if self.is_playing:
+                self.current_event_index = len(all_events)
+
             # 最後まで再生した場合のみ、次の曲へ進む
-            if self.is_playing and self.current_event_index >= len(all_events) - 1:
+            if self.is_playing and self.current_event_index >= len(all_events):
                 self.current_event_index = 0  # 位置をリセット
                 self.root.after(0, self.on_playback_finished)
 
@@ -1148,13 +1210,13 @@ BPM: {bpm_info}
             self.root.after(0, self.log, f"再生中にエラーが発生しました: {str(e)}")
             self.root.after(0, self.stop_play)
 
-    def play_next(self):
+    def play_next(self, auto_play=False):
         """次の曲を再生"""
         if not self.playlist:
             return
             
         # 現在再生中なら停止（オーバーレイは維持）
-        was_playing = self.is_playing
+        was_playing = self.is_playing or auto_play
         if self.is_playing:
             self.is_playing = False
             # キーを全て離す
@@ -1232,13 +1294,20 @@ BPM: {bpm_info}
 
     def on_playback_finished(self):
         """再生完了時の処理 - 自動で次の曲に進む"""
+        self.is_playing = False  # 再生状態をリセット
+        
         if len(self.playlist) > 1:
             # プレイリストに複数曲がある場合は自動で次の曲へ
             self.log("曲が終了しました。次の曲を再生します。")
-            self.play_next()
+            self.play_next(auto_play=True)
         else:
-            # 単一ファイルの場合は停止
-            self.stop_play()
+            # 単一ファイルの場合は進度を維持して停止
+            self.progress_var.set(100)
+            if self.overlay_window and self.overlay_window.winfo_exists():
+                self.overlay_progress_var.set(100)
+            self.play_btn.config(text="▶ PLAY")
+            if self.overlay_window and self.overlay_window.winfo_exists():
+                self.overlay_play_btn.config(text="▶ 再生")
             self.log("再生が完了しました。")
 
     def update_play_status(self, message):
@@ -1287,4 +1356,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
