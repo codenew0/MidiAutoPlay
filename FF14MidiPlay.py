@@ -42,6 +42,7 @@ class MidiPlayerUI:
         # 再生位置を記録する変数を追加
         self.current_event_index = 0  # 現在の再生位置
         self.pause_time = 0  # 一時停止時の時間
+        self.seek_target_time = None  # シーク先の時間（秒）
         
         # プレイリスト機能用の新しい変数
         self.playlist = []  # ファイルパスのリスト
@@ -329,10 +330,13 @@ class MidiPlayerUI:
         self.speed_label.grid(row=0, column=4)
         self.speed_var.trace('w', self.update_speed_label)
 
-        # プログレスバー
+        # プログレスバー（カスタム Canvas シークバー）
         self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(control_frame, variable=self.progress_var, maximum=100)
+        self.progress_bar = tk.Canvas(control_frame, height=20, bg='#e0e0e0', highlightthickness=0, cursor='hand2')
         self.progress_bar.grid(row=1, column=0, columnspan=5, sticky=(tk.W, tk.E), pady=(10, 0))
+        self.progress_bar.bind('<Button-1>', self.on_progress_click)
+        self.progress_bar.bind('<Configure>', lambda e: self._draw_progress(self.progress_bar, self.progress_var))
+        self.progress_var.trace_add('write', lambda *a: self._draw_progress(self.progress_bar, self.progress_var))
 
         # 現在の状態表示
         status_frame = ttk.Frame(main_frame)
@@ -527,6 +531,7 @@ class MidiPlayerUI:
         # 再生進度をリセット
         self.current_event_index = 0
         self.pause_time = 0
+        self.seek_target_time = None
         self.progress_var.set(0)
         if self.overlay_window and self.overlay_window.winfo_exists():
             self.overlay_progress_var.set(0)
@@ -832,6 +837,13 @@ BPM: {bpm_info}
     def destroy_overlay_window(self):
         """オーバーレイウィンドウを破棄"""
         if self.overlay_window:
+            # trace コールバックを解除
+            try:
+                if hasattr(self, 'overlay_progress_var'):
+                    for trace_id in self.overlay_progress_var.trace_info():
+                        self.overlay_progress_var.trace_remove(trace_id[0], trace_id[1])
+            except:
+                pass
             try:
                 if self.overlay_window.winfo_exists():
                     self.overlay_window.destroy()
@@ -881,10 +893,13 @@ BPM: {bpm_info}
         self.overlay_stop_btn = ttk.Button(button_frame, text="⏹ 終了", command=self.close_overlay, width=8)
         self.overlay_stop_btn.pack(side=tk.LEFT, padx=5)
         
-        # プログレスバー
+        # プログレスバー（カスタム Canvas シークバー）
         self.overlay_progress_var = tk.DoubleVar()
-        self.overlay_progress_bar = ttk.Progressbar(overlay_frame, variable=self.overlay_progress_var, maximum=100)
+        self.overlay_progress_bar = tk.Canvas(overlay_frame, height=20, bg='#e0e0e0', highlightthickness=0, cursor='hand2')
         self.overlay_progress_bar.pack(fill=tk.X, pady=(10, 0))
+        self.overlay_progress_bar.bind('<Button-1>', self.on_progress_click)
+        self.overlay_progress_bar.bind('<Configure>', lambda e: self._draw_progress(self.overlay_progress_bar, self.overlay_progress_var))
+        self.overlay_progress_var.trace_add('write', lambda *a: self._draw_progress(self.overlay_progress_bar, self.overlay_progress_var))
         
         # 現在のファイル名を更新
         if self.midi_file:
@@ -951,6 +966,95 @@ BPM: {bpm_info}
         self.update_playlist_display()
         self.log(f"再生を一時停止しました。(位置: {self.current_event_index})")
 
+    def _draw_progress(self, canvas, var):
+        """Canvas プログレスバーを描画"""
+        try:
+            if not canvas.winfo_exists():
+                return
+            canvas.delete('all')
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            if w <= 1:
+                return
+            percent = max(0.0, min(100.0, var.get()))
+            fill_w = int((percent / 100.0) * w)
+            if fill_w > 0:
+                canvas.create_rectangle(0, 0, fill_w, h, fill='#4a9eff', outline='')
+            # 残りの背景部分
+            if fill_w < w:
+                canvas.create_rectangle(fill_w, 0, w, h, fill='#e0e0e0', outline='')
+            # パーセンテージテキスト
+            if percent > 0:
+                canvas.create_text(w // 2, h // 2, text=f"{percent:.0f}%", font=('Arial', 9), fill='#333')
+        except tk.TclError:
+            pass
+
+    def on_progress_click(self, event):
+        """プログレスバーをクリックしてシーク"""
+        if not self.key_sequence:
+            return
+        
+        # クリック位置からパーセンテージを計算
+        widget = event.widget
+        click_x = event.x
+        bar_width = widget.winfo_width()
+        if bar_width <= 0:
+            return
+        
+        percent = max(0.0, min(100.0, (click_x / bar_width) * 100))
+        
+        # 全体の再生時間からターゲット時刻を計算
+        total_duration = self.key_sequence[-1]['time'] if self.key_sequence else 0
+        if total_duration <= 0:
+            return
+        
+        target_time = (percent / 100.0) * total_duration
+        
+        # 再生中だったら一旦停止して再開
+        was_playing = self.is_playing
+        if self.is_playing:
+            self.is_playing = False
+            # キーを全て離す
+            try:
+                for key in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'q', 'w',
+                            'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'a', 's', 'd', 'f',
+                            'g', 'h', 'j', 'k', 'l', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',']:
+                    try:
+                        self.keyboard.release(key)
+                    except:
+                        pass
+            except:
+                pass
+        
+        # シーク先の時間を保存（play_sequenceが all_events 構築後にインデックスを解決する）
+        self.seek_target_time = target_time
+        # current_event_index を -1 にしてシーク時間を使うことを示す
+        self.current_event_index = -1
+        
+        # プログレスバーを更新
+        self.progress_var.set(percent)
+        if self.overlay_window and self.overlay_window.winfo_exists():
+            self.overlay_progress_var.set(percent)
+        
+        self.log(f"シーク: {target_time:.1f}秒 ({percent:.0f}%)")
+        
+        # 再生中だった場合はスレッド終了を待って再開
+        if was_playing:
+            self.play_btn.config(text="▶ PLAY")
+            if self.overlay_window and self.overlay_window.winfo_exists():
+                self.overlay_play_btn.config(text="▶ 再生")
+            self._seek_resume_retry(5)
+
+    def _seek_resume_retry(self, retries_left):
+        """シーク後の再生再開（スレッド終了を待ってリトライ）"""
+        if retries_left <= 0:
+            self.log("シーク後の再開に失敗しました。手動で再生してください。")
+            return
+        if self.play_thread and self.play_thread.is_alive():
+            self.root.after(100, self._seek_resume_retry, retries_left - 1)
+        else:
+            self.start_play()
+
     def close_overlay(self):
         """オーバーレイウィンドウを閉じてメインウィンドウに戻る（進度は維持）"""
         # 再生中なら一時停止
@@ -990,6 +1094,7 @@ BPM: {bpm_info}
         # 再生位置をリセット
         self.current_event_index = 0
         self.pause_time = 0
+        self.seek_target_time = None
         self.progress_var.set(0)
         if self.overlay_window and self.overlay_window.winfo_exists():
             self.overlay_progress_var.set(0)
@@ -1013,6 +1118,7 @@ BPM: {bpm_info}
         # 再生位置をリセット
         self.current_event_index = 0
         self.pause_time = 0
+        self.seek_target_time = None
 
         # メインウィンドウを表示
         if self.root.state() != 'normal':
@@ -1119,7 +1225,23 @@ BPM: {bpm_info}
             active_tracks = set(range(len(mid.tracks))) - self.muted_tracks
             
             # 再開位置からの開始時刻を計算
-            if self.current_event_index > 0 and self.current_event_index < len(all_events):
+            if self.current_event_index == -1 and self.seek_target_time is not None:
+                # シークバーからの時間指定: all_events内で該当時刻のインデックスを探す
+                seek_time = self.seek_target_time
+                self.seek_target_time = None  # 使用済みなのでクリア
+                
+                # 二分探索で seek_time 以上の最初のイベントを探す
+                lo, hi = 0, len(all_events)
+                while lo < hi:
+                    m = (lo + hi) // 2
+                    if all_events[m]['time'] < seek_time:
+                        lo = m + 1
+                    else:
+                        hi = m
+                self.current_event_index = lo
+                start_time_offset = seek_time
+                self.root.after(0, self.log, f"シーク位置 {self.current_event_index}/{len(all_events)} から再開 ({start_time_offset:.2f}秒)")
+            elif self.current_event_index > 0 and self.current_event_index < len(all_events):
                 start_time_offset = all_events[self.current_event_index]['time']
                 self.root.after(0, self.log, f"位置 {self.current_event_index}/{len(all_events)} から再開 ({start_time_offset:.2f}秒)")
             else:
@@ -1131,8 +1253,9 @@ BPM: {bpm_info}
             # current_event_index から再生を開始
             for i in range(self.current_event_index, len(all_events)):
                 if not self.is_playing:
-                    # 一時停止の場合は現在位置を保存
-                    self.current_event_index = i
+                    # シーク中でなければ現在位置を保存
+                    if self.current_event_index != -1:
+                        self.current_event_index = i
                     break
 
                 event = all_events[i]
@@ -1144,7 +1267,8 @@ BPM: {bpm_info}
                     time.sleep(wait_time)
 
                 if not self.is_playing:
-                    self.current_event_index = i
+                    if self.current_event_index != -1:
+                        self.current_event_index = i
                     break
 
                 key = self.note_to_key.get(event['note'])
@@ -1233,6 +1357,7 @@ BPM: {bpm_info}
         
         # 再生位置をリセット
         self.current_event_index = 0
+        self.seek_target_time = None
         
         # 次の曲のインデックスを計算(最後の曲の場合は最初に戻る)
         self.current_playlist_index = (self.current_playlist_index + 1) % len(self.playlist)
@@ -1274,6 +1399,7 @@ BPM: {bpm_info}
         
         # 再生位置をリセット
         self.current_event_index = 0
+        self.seek_target_time = None
         
         # 前の曲のインデックスを計算(最初の曲の場合は最後に行く)
         self.current_playlist_index = (self.current_playlist_index - 1) % len(self.playlist)
@@ -1352,7 +1478,6 @@ def main():
     
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
-
 
 if __name__ == "__main__":
     main()
