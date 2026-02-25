@@ -111,7 +111,7 @@ class MidiPlayerUI:
 
     def analyze_midi_range(self, filepath):
         """MIDIファイルの音域を分析してオクターブシフトを計算"""
-        mid = mido.MidiFile(filepath)
+        mid = mido.MidiFile(filepath, clip=True)
         
         all_notes = []
         for track in mid.tracks:
@@ -572,7 +572,7 @@ class MidiPlayerUI:
 
     def analyze_midi_file(self, filepath):
         """MIDIファイルを解析して基本情報を取得"""
-        mid = mido.MidiFile(filepath)
+        mid = mido.MidiFile(filepath, clip=True)
 
         info = {
             'filename': os.path.basename(filepath),
@@ -663,7 +663,7 @@ class MidiPlayerUI:
 
     def convert_to_key_sequence(self, filepath):
         """MIDIファイルをキーシーケンスに変換（テンポ変化対応版）"""
-        mid = mido.MidiFile(filepath)
+        mid = mido.MidiFile(filepath, clip=True)
         
         # テンポマップを作成（全トラックから収集）
         tempo_map = []  # (累積tick, tempo)のリスト
@@ -1157,7 +1157,7 @@ BPM: {bpm_info}
 
         try:
             # MIDIファイルからテンポマップを作成
-            mid = mido.MidiFile(self.midi_file)
+            mid = mido.MidiFile(self.midi_file, clip=True)
             tempo_map = []
             
             for track in mid.tracks:
