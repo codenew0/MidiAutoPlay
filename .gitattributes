@@ -1,0 +1,14 @@
+# 自動改行コード変換
+* text=auto
+
+# テキストファイルは LF で統一
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.gitignore text eol=lf
+
+# バイナリファイルは変換しない
+*.mid   binary
+*.midi  binary
+*.png   binary
+*.jpg   binary
