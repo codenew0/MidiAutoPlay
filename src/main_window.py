@@ -58,6 +58,8 @@ class MidiPlayerUI:
             on_next=self.play_next,
             on_close=self.close_overlay,
             on_progress_click=self.on_progress_click,
+            on_speed_change=self._on_overlay_speed_change,
+            on_speed_drag_start=self._on_overlay_speed_drag_start,
         )
 
         # グローバルホットキー
@@ -128,6 +130,7 @@ class MidiPlayerUI:
         pl_sb = ttk.Scrollbar(pl_frame, orient=tk.VERTICAL, command=self.playlist_tree.yview)
         pl_sb.grid(row=0, column=1, sticky=(tk.N, tk.S))
         self.playlist_tree.configure(yscrollcommand=pl_sb.set)
+        self.playlist_tree.bind('<Double-1>', self.on_playlist_double_click)
 
         pl_ctrl = ttk.Frame(pl_frame)
         pl_ctrl.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
@@ -377,7 +380,7 @@ class MidiPlayerUI:
         self.reset_btn.config(state='normal')
 
         if not self.overlay.is_open():
-            self.overlay.create(os.path.basename(self.midi_file or ""))
+            self.overlay.create(os.path.basename(self.midi_file or ""), speed=self.speed_var.get())
         else:
             self.overlay.set_filename(os.path.basename(self.midi_file or ""))
             self.overlay.set_play_button_text("⏸ 停止")
@@ -434,6 +437,42 @@ class MidiPlayerUI:
         self.log(msg)
         self.stop_play()
 
+    def on_playlist_double_click(self, event) -> None:
+        """プレイリストのダブルクリックで曲を選択（再生中なら停止してから切り替え）"""
+        sel = self.playlist_tree.selection()
+        if not sel:
+            return
+        item = sel[0]
+        # Treeview内のアイテム順序からインデックスを取得
+        all_items = self.playlist_tree.get_children()
+        try:
+            clicked_index = list(all_items).index(item)
+        except ValueError:
+            return
+
+        if clicked_index == self.playlist_mgr.current_index:
+            return  # 既に選択中
+
+        was_playing = self.player.is_playing
+        if was_playing:
+            self.player.is_playing = False
+            self._release_all_keys()
+            self.player.wait_for_stop(timeout=1.0)
+
+        self.player.current_event_index = 0
+        self.player.seek_target_time = None
+
+        self.playlist_mgr.current_index = clicked_index
+        self.midi_file = self.playlist_mgr.current_file
+        if self.midi_file:
+            self.file_path_var.set(self.midi_file)
+        self.analyze_file()
+        self.progress_var.set(0)
+        if self.overlay.is_open():
+            self.overlay.set_progress(0)
+        self.update_playlist_display()
+        self.log(f"選択: {os.path.basename(self.midi_file or '')}")
+
     # ------------------------------------------------------------------
     # プレイリスト操作
     # ------------------------------------------------------------------
@@ -444,14 +483,20 @@ class MidiPlayerUI:
             self.player.is_playing = False
             self._release_all_keys()
 
+        # 前の再生スレッドが完全に終了するのを待つ
+        self.player.wait_for_stop(timeout=1.0)
+
         self.player.current_event_index = 0
         self.player.seek_target_time = None
 
         self.midi_file = self.playlist_mgr.go_next()
         if self.midi_file:
             self.file_path_var.set(self.midi_file)
-        self.update_playlist_display()
         self.analyze_file()
+        self.progress_var.set(0)
+        if self.overlay.is_open():
+            self.overlay.set_progress(0)
+        self.update_playlist_display()
         self.log(f"次の曲: {os.path.basename(self.midi_file or '')}")
 
         if self.key_sequence and was_playing:
@@ -463,14 +508,20 @@ class MidiPlayerUI:
             self.player.is_playing = False
             self._release_all_keys()
 
+        # 前の再生スレッドが完全に終了するのを待つ
+        self.player.wait_for_stop(timeout=1.0)
+
         self.player.current_event_index = 0
         self.player.seek_target_time = None
 
         self.midi_file = self.playlist_mgr.go_previous()
         if self.midi_file:
             self.file_path_var.set(self.midi_file)
-        self.update_playlist_display()
         self.analyze_file()
+        self.progress_var.set(0)
+        if self.overlay.is_open():
+            self.overlay.set_progress(0)
+        self.update_playlist_display()
         self.log(f"前の曲: {os.path.basename(self.midi_file or '')}")
 
         if self.key_sequence and was_playing:
@@ -548,6 +599,23 @@ class MidiPlayerUI:
         self.overlay.destroy()
         self.update_playlist_display()
         self.log("プレイウィンドウを閉じました。進度は維持されています。")
+
+    def _on_overlay_speed_drag_start(self) -> None:
+        """速度スライダーのドラッグ開始時に再生を停止"""
+        if self.player.is_playing:
+            self.player.pause()
+            self.player.wait_for_stop(timeout=0.2)
+            self._release_all_keys()
+        self.play_btn.config(text="▶ PLAY")
+        if self.overlay.is_open():
+            self.overlay.set_play_button_text("▶ 再生")
+
+    def _on_overlay_speed_change(self, speed: float) -> None:
+        """速度スライダーのリリース時に新しい速度で再生を再開"""
+        self.speed_var.set(speed)
+        if self.key_sequence:
+            self.player.wait_for_stop(timeout=0.2)
+            self._start()
 
     # ------------------------------------------------------------------
     # トラックミュート

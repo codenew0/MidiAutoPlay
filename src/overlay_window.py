@@ -18,10 +18,13 @@ class OverlayWindow:
         on_next,
         on_close,
         on_progress_click,
+        on_speed_change=None,
+        on_speed_drag_start=None,
     ):
         self.root = root
         self.window: tk.Toplevel | None = None
         self.progress_var: tk.DoubleVar | None = None
+        self.speed_var: tk.DoubleVar | None = None
 
         # コールバック
         self._on_toggle_play = on_toggle_play
@@ -29,18 +32,20 @@ class OverlayWindow:
         self._on_next = on_next
         self._on_close = on_close
         self._on_progress_click = on_progress_click
+        self._on_speed_change = on_speed_change
+        self._on_speed_drag_start = on_speed_drag_start
 
     # ------------------------------------------------------------------
     # ライフサイクル
     # ------------------------------------------------------------------
 
-    def create(self, filename: str = "") -> None:
+    def create(self, filename: str = "", speed: float = 1.0) -> None:
         """オーバーレイウィンドウを作成する（既存があれば先に破棄）"""
         self.destroy()
 
         self.window = tk.Toplevel(self.root)
         self.window.title("MIDI Player - Playing")
-        self.window.geometry("400x150")
+        self.window.geometry("400x190")
         self.window.configure(bg='#2c2c2c')
         self.window.attributes('-topmost', True)
         self.window.geometry("+{}+50".format(self.root.winfo_screenwidth() - 450))
@@ -48,15 +53,17 @@ class OverlayWindow:
 
         self._build_widgets()
         self.set_filename(filename)
+        self.set_speed(speed)
 
     def destroy(self) -> None:
         """オーバーレイウィンドウを破棄する"""
-        if self.progress_var is not None:
-            try:
-                for trace_id in self.progress_var.trace_info():
-                    self.progress_var.trace_remove(trace_id[0], trace_id[1])
-            except Exception:
-                pass
+        for var in (self.progress_var, self.speed_var):
+            if var is not None:
+                try:
+                    for trace_id in var.trace_info():
+                        var.trace_remove(trace_id[0], trace_id[1])
+                except Exception:
+                    pass
 
         if self.window is not None:
             try:
@@ -68,6 +75,7 @@ class OverlayWindow:
                 self.window = None
 
         self.progress_var = None
+        self.speed_var = None
 
     def is_open(self) -> bool:
         return self.window is not None and self.window.winfo_exists()
@@ -87,6 +95,10 @@ class OverlayWindow:
     def set_progress(self, percent: float) -> None:
         if self.progress_var is not None:
             self.progress_var.set(percent)
+
+    def set_speed(self, speed: float) -> None:
+        if self.speed_var is not None:
+            self.speed_var.set(speed)
 
     # ------------------------------------------------------------------
     # ウィジェット構築
@@ -128,6 +140,42 @@ class OverlayWindow:
             'write', lambda *a: _draw_progress(canvas, self.progress_var)
         )
         self._progress_canvas = canvas
+
+        # 速度スライダー
+        speed_frame = ttk.Frame(frame)
+        speed_frame.pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Label(speed_frame, text="速度:").pack(side=tk.LEFT, padx=(0, 5))
+        self.speed_var = tk.DoubleVar(value=1.0)
+        self._speed_dragging = False
+        self._speed_scale = tk.Scale(
+            speed_frame, from_=0.1, to=2.0, variable=self.speed_var,
+            orient=tk.HORIZONTAL, resolution=0.1, showvalue=False,
+            sliderlength=15, length=200,
+            command=self._on_speed_command,
+        )
+        self._speed_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self._speed_label = ttk.Label(speed_frame, text="1.0x", width=5)
+        self._speed_label.pack(side=tk.LEFT)
+        self._speed_scale.bind('<ButtonRelease-1>', self._on_speed_release)
+
+    def _on_speed_command(self, value_str) -> None:
+        """スライダーが動いた瞬間（最初の動きでpauseを通知）"""
+        speed = float(value_str)
+        if hasattr(self, '_speed_label'):
+            self._speed_label.config(text=f"{speed:.1f}x")
+        if not self._speed_dragging:
+            self._speed_dragging = True
+            if self._on_speed_drag_start:
+                self._on_speed_drag_start()
+
+    def _on_speed_release(self, event) -> None:
+        """スライダーのマウスリリース時に速度変更をコールバックで通知"""
+        self._speed_dragging = False
+        if self.speed_var is None:
+            return
+        if self._on_speed_change:
+            self._on_speed_change(self.speed_var.get())
 
 
 # ------------------------------------------------------------------

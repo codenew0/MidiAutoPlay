@@ -136,8 +136,9 @@ class MidiPlayer:
                 event = all_events[i]
                 target_time = event['time'] / speed
                 wait = target_time - (time.time() - play_start)
-                if wait > 0:
-                    time.sleep(wait)
+                while wait > 0 and self.is_playing:
+                    time.sleep(min(wait, 0.01))
+                    wait = target_time - (time.time() - play_start)
 
                 if not self.is_playing:
                     if self.current_event_index != -1:
