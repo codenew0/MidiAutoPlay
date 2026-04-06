@@ -2,6 +2,7 @@
 
 import os
 import glob
+import random
 
 
 class PlaylistManager:
@@ -66,6 +67,13 @@ class PlaylistManager:
     def is_multi(self) -> bool:
         """プレイリストに2曲以上あるか"""
         return len(self.playlist) > 1
+
+    def shuffle(self) -> None:
+        """プレイリストをシャッフルし、先頭を選択状態にする"""
+        if len(self.playlist) <= 1:
+            return
+        random.shuffle(self.playlist)
+        self.current_index = 0
 
     # ------------------------------------------------------------------
     # 表示用データ

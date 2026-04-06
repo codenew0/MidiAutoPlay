@@ -35,6 +35,7 @@ class MidiPlayerUI:
         self.note_to_key: dict = BASE_NOTE_TO_KEY.copy()
         self.muted_tracks: set = set()
         self.current_shift: int = 0
+        self._speed_resume_id = None
 
         # サブコンポーネント
         self.player = MidiPlayer()
@@ -140,6 +141,9 @@ class MidiPlayerUI:
         self.next_btn = ttk.Button(pl_ctrl, text="次の曲 ▶",
                                    command=self.play_next, state='disabled')
         self.next_btn.grid(row=0, column=1, padx=(0, 5))
+        self.shuffle_btn = ttk.Button(pl_ctrl, text="🔀 シャッフル",
+                                      command=self.shuffle_playlist, state='disabled')
+        self.shuffle_btn.grid(row=0, column=2, padx=(0, 5))
 
         # MIDI情報
         info_frame = ttk.LabelFrame(main_frame, text="MIDI情報", padding="10")
@@ -249,6 +253,7 @@ class MidiPlayerUI:
         self.analyze_file()
         self.prev_btn.config(state='normal')
         self.next_btn.config(state='normal')
+        self.shuffle_btn.config(state='normal')
         self.log(f"ファイルが選択されました: {os.path.basename(path)}")
 
     def browse_folder(self) -> None:
@@ -267,6 +272,7 @@ class MidiPlayerUI:
         self.update_playlist_display()
         self.prev_btn.config(state='normal')
         self.next_btn.config(state='normal')
+        self.shuffle_btn.config(state='normal')
         self.log(f"フォルダから{count}個のMIDIファイルが見つかりました: {folder}")
 
     # ------------------------------------------------------------------
@@ -473,6 +479,21 @@ class MidiPlayerUI:
         self.update_playlist_display()
         self.log(f"選択: {os.path.basename(self.midi_file or '')}")
 
+    def shuffle_playlist(self) -> None:
+        """プレイリストをシャッフルする"""
+        if not self.playlist_mgr.playlist:
+            return
+        self.playlist_mgr.shuffle()
+        self.midi_file = self.playlist_mgr.current_file
+        if self.midi_file:
+            self.file_path_var.set(self.midi_file)
+        self.analyze_file()
+        self.progress_var.set(0)
+        if self.overlay.is_open():
+            self.overlay.set_progress(0)
+        self.update_playlist_display()
+        self.log("プレイリストをシャッフルしました。")
+
     # ------------------------------------------------------------------
     # プレイリスト操作
     # ------------------------------------------------------------------
@@ -602,9 +623,10 @@ class MidiPlayerUI:
 
     def _on_overlay_speed_drag_start(self) -> None:
         """速度スライダーのドラッグ開始時に再生を停止"""
+        # 進行中のresume retryをキャンセル
+        self._speed_resume_id = None
         if self.player.is_playing:
             self.player.pause()
-            self.player.wait_for_stop(timeout=0.2)
             self._release_all_keys()
         self.play_btn.config(text="▶ PLAY")
         if self.overlay.is_open():
@@ -614,7 +636,23 @@ class MidiPlayerUI:
         """速度スライダーのリリース時に新しい速度で再生を再開"""
         self.speed_var.set(speed)
         if self.key_sequence:
-            self.player.wait_for_stop(timeout=0.2)
+            # 一意のIDでポーリング開始（ドラッグ再開で古いポーリングはキャンセルされる）
+            resume_id = object()
+            self._speed_resume_id = resume_id
+            self._speed_resume_retry(resume_id, 10)
+
+    def _speed_resume_retry(self, resume_id, retries_left: int) -> None:
+        """再生スレッドが終了するまでポーリングし、終了後に再開"""
+        if self._speed_resume_id is not resume_id:
+            return  # 新しいドラッグが始まったのでこのポーリングはキャンセル
+        if retries_left <= 0:
+            self._speed_resume_id = None
+            self._start()
+            return
+        if self.player.play_thread and self.player.play_thread.is_alive():
+            self.root.after(30, self._speed_resume_retry, resume_id, retries_left - 1)
+        else:
+            self._speed_resume_id = None
             self._start()
 
     # ------------------------------------------------------------------
