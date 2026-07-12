@@ -1,6 +1,7 @@
 # main_window.py - メインウィンドウのUI定義と制御ロジック
 
 import os
+import queue
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
@@ -36,20 +37,18 @@ class MidiPlayerUI:
         self.muted_tracks: set = set()
         self.current_shift: int = 0
         self._speed_resume_id = None
+        self._speed_was_playing = False
+        self._player_events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         # サブコンポーネント
         self.player = MidiPlayer()
         self.playlist_mgr = PlaylistManager()
 
         # プレイヤーのコールバックを登録
-        self.player.on_status_update = lambda msg: self.root.after(0, self.log, msg)
-        self.player.on_progress_update = lambda pct: self.root.after(
-            0, self._update_progress, pct
-        )
-        self.player.on_playback_finished = lambda: self.root.after(
-            0, self.on_playback_finished
-        )
-        self.player.on_error = lambda msg: self.root.after(0, self._on_player_error, msg)
+        self.player.on_status_update = lambda msg: self._player_events.put(('status', msg))
+        self.player.on_progress_update = lambda pct: self._player_events.put(('progress', pct))
+        self.player.on_playback_finished = lambda: self._player_events.put(('finished', None))
+        self.player.on_error = lambda msg: self._player_events.put(('error', msg))
 
         # オーバーレイ
         self.overlay = OverlayWindow(
@@ -67,12 +66,35 @@ class MidiPlayerUI:
         self.hotkeys = GlobalHotKeys({
             '<ctrl>+<alt>+p': lambda: self.root.after(0, self.toggle_play),
             '<ctrl>+<alt>+s': lambda: self.root.after(0, self.reset_play),
-            '<ctrl>+<right>': lambda: self.root.after(0, self.play_next),
-            '<ctrl>+<left>': lambda: self.root.after(0, self.play_previous),
+            '<ctrl>+<alt>+<right>': lambda: self.root.after(0, self.play_next),
+            '<ctrl>+<alt>+<left>': lambda: self.root.after(0, self.play_previous),
         })
         self.hotkeys.start()
 
         self.create_widgets()
+        self.root.after(20, self._process_player_events)
+
+    def _process_player_events(self) -> None:
+        """再生スレッドからの通知をTkのメインスレッドで処理する。"""
+        try:
+            while True:
+                event_type, value = self._player_events.get_nowait()
+                if event_type == 'status':
+                    self.log(str(value))
+                elif event_type == 'progress':
+                    self._update_progress(float(value))
+                elif event_type == 'finished':
+                    self.on_playback_finished()
+                elif event_type == 'error':
+                    self._on_player_error(str(value))
+        except queue.Empty:
+            pass
+
+        try:
+            if self.root.winfo_exists():
+                self.root.after(20, self._process_player_events)
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------
     # UI構築
@@ -461,9 +483,7 @@ class MidiPlayerUI:
 
         was_playing = self.player.is_playing
         if was_playing:
-            self.player.is_playing = False
-            self._release_all_keys()
-            self.player.wait_for_stop(timeout=1.0)
+            self.player.stop_and_release()
 
         self.player.current_event_index = 0
         self.player.seek_target_time = None
@@ -500,12 +520,12 @@ class MidiPlayerUI:
 
     def play_next(self, auto_play: bool = False) -> None:
         was_playing = self.player.is_playing or auto_play
-        if self.player.is_playing:
-            self.player.is_playing = False
-            self._release_all_keys()
-
-        # 前の再生スレッドが完全に終了するのを待つ
-        self.player.wait_for_stop(timeout=1.0)
+        # 旧スレッドの停止後に解放することで、停止処理中に押されたキーも
+        # 次の曲へ持ち越さない。
+        stopped = self.player.stop_and_release()
+        if not stopped:
+            self.log("前の再生処理が停止しなかったため、次の曲の再生を中止しました。")
+            return
 
         self.player.current_event_index = 0
         self.player.seek_target_time = None
@@ -525,12 +545,10 @@ class MidiPlayerUI:
 
     def play_previous(self) -> None:
         was_playing = self.player.is_playing
-        if self.player.is_playing:
-            self.player.is_playing = False
-            self._release_all_keys()
-
-        # 前の再生スレッドが完全に終了するのを待つ
-        self.player.wait_for_stop(timeout=1.0)
+        stopped = self.player.stop_and_release()
+        if not stopped:
+            self.log("前の再生処理が停止しなかったため、前の曲への移動を中止しました。")
+            return
 
         self.player.current_event_index = 0
         self.player.seek_target_time = None
@@ -625,6 +643,7 @@ class MidiPlayerUI:
         """速度スライダーのドラッグ開始時に再生を停止"""
         # 進行中のresume retryをキャンセル
         self._speed_resume_id = None
+        self._speed_was_playing = self.player.is_playing
         if self.player.is_playing:
             self.player.pause()
             self._release_all_keys()
@@ -635,11 +654,13 @@ class MidiPlayerUI:
     def _on_overlay_speed_change(self, speed: float) -> None:
         """速度スライダーのリリース時に新しい速度で再生を再開"""
         self.speed_var.set(speed)
-        if self.key_sequence:
+        if self.key_sequence and self._speed_was_playing:
             # 一意のIDでポーリング開始（ドラッグ再開で古いポーリングはキャンセルされる）
             resume_id = object()
             self._speed_resume_id = resume_id
             self._speed_resume_retry(resume_id, 10)
+        else:
+            self._speed_was_playing = False
 
     def _speed_resume_retry(self, resume_id, retries_left: int) -> None:
         """再生スレッドが終了するまでポーリングし、終了後に再開"""
@@ -647,12 +668,14 @@ class MidiPlayerUI:
             return  # 新しいドラッグが始まったのでこのポーリングはキャンセル
         if retries_left <= 0:
             self._speed_resume_id = None
+            self._speed_was_playing = False
             self._start()
             return
         if self.player.play_thread and self.player.play_thread.is_alive():
             self.root.after(30, self._speed_resume_retry, resume_id, retries_left - 1)
         else:
             self._speed_resume_id = None
+            self._speed_was_playing = False
             self._start()
 
     # ------------------------------------------------------------------

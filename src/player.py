@@ -2,6 +2,7 @@
 
 import time
 import threading
+from collections import Counter
 from pynput.keyboard import Controller
 
 from src.constants import ALL_KEYS
@@ -53,10 +54,9 @@ class MidiPlayer:
 
     def reset(self) -> None:
         """再生位置を先頭に戻す"""
-        self.is_playing = False
+        self.stop_and_release()
         self.current_event_index = 0
         self.seek_target_time = None
-        self._release_all_keys()
 
     def seek(self, target_time: float) -> None:
         """指定秒数にシークする（再生中なら一旦停止が必要）"""
@@ -69,6 +69,16 @@ class MidiPlayer:
         """再生スレッドが停止するのを待つ"""
         if self.play_thread and self.play_thread.is_alive():
             self.play_thread.join(timeout=timeout)
+
+    def stop_and_release(self, timeout: float = 1.0) -> bool:
+        """再生スレッドを停止し、その終了後に全キーを確実に解放する。"""
+        self.is_playing = False
+        self.wait_for_stop(timeout=timeout)
+
+        # 停止要求直前に再生スレッドがキーを押す競合を防ぐため、join 後に
+        # 改めて全キーを解放する。
+        self._release_all_keys()
+        return not (self.play_thread and self.play_thread.is_alive())
 
     # ------------------------------------------------------------------
     # 内部処理
@@ -92,11 +102,11 @@ class MidiPlayer:
     def _play_sequence(self, midi_file: str, note_to_key: dict,
                        muted_tracks: set, speed: float, key_sequence: list) -> None:
         """バックグラウンドスレッドで実行される再生ループ"""
-        total_duration = key_sequence[-1]['time'] if key_sequence else 0
-        currently_pressed: set[str] = set()
+        currently_pressed: Counter[str] = Counter()
 
         try:
             all_events = build_raw_events(midi_file, muted_tracks, note_to_key)
+            total_duration = all_events[-1]['time'] if all_events else 0
 
             # 開始インデックスと開始オフセットを決定
             if self.current_event_index == -1 and self.seek_target_time is not None:
@@ -152,7 +162,7 @@ class MidiPlayer:
                 note_name = midi_to_note_name(event['note'])
                 action = self._send_key(event['type'], key, currently_pressed)
 
-                pressed_display = ' + '.join(sorted(currently_pressed)) or 'なし'
+                pressed_display = ' + '.join(sorted(currently_pressed.keys())) or 'なし'
                 track_info = f"Track{event['track']}"
                 self._emit_status(
                     f"{event['time']:.3f}s | {action} {key}({note_name}) "
@@ -178,23 +188,29 @@ class MidiPlayer:
             if self.on_error:
                 self.on_error(f"再生中にエラーが発生しました: {e}")
         finally:
-            for key in list(currently_pressed):
+            for key in list(currently_pressed.keys()):
                 try:
                     self.keyboard.release(key)
                 except Exception:
                     pass
 
-    def _send_key(self, event_type: str, key: str, currently_pressed: set) -> str:
+    def _send_key(self, event_type: str, key: str,
+                  currently_pressed: Counter[str]) -> str:
         """キーを送信して現在の押下セットを更新。アクション名を返す。"""
         if event_type == 'press':
-            if key not in currently_pressed:
+            if currently_pressed[key] == 0:
                 self.keyboard.press(key)
-                currently_pressed.add(key)
-                return "PRESS"
-            return "ALREADY PRESSED"
+                action = "PRESS"
+            else:
+                action = "ALREADY PRESSED"
+            currently_pressed[key] += 1
+            return action
         else:  # release
-            if key in currently_pressed:
+            if currently_pressed[key] > 1:
+                currently_pressed[key] -= 1
+                return "STILL PRESSED"
+            if currently_pressed[key] == 1:
                 self.keyboard.release(key)
-                currently_pressed.remove(key)
+                currently_pressed.pop(key, None)
                 return "RELEASE"
             return "ALREADY RELEASED"

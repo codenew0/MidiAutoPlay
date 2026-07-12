@@ -10,6 +10,7 @@ def main():
 
     def on_closing():
         try:
+            app.player.stop_and_release()
             app.hotkeys.stop()
             app.overlay.destroy()
         except Exception:

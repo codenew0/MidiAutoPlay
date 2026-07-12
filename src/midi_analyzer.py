@@ -2,7 +2,8 @@
 
 import os
 import mido
-from collections import defaultdict
+from collections import Counter
+from itertools import groupby
 
 from src.constants import (
     KEYBOARD_MIN_NOTE, KEYBOARD_MAX_NOTE,
@@ -32,9 +33,13 @@ def build_tempo_map(mid: mido.MidiFile) -> list[tuple[int, int]]:
                 tempo_map.append((current_tick, msg.tempo))
 
     tempo_map.sort(key=lambda x: x[0])
-    if not tempo_map:
-        tempo_map = [(0, 500000)]
-    return tempo_map
+
+    # MIDI の既定テンポは 120 BPM。同じ tick に複数の指定がある場合は
+    # 後から収集した指定を採用する。
+    merged: dict[int, int] = {0: 500000}
+    for tick, tempo in tempo_map:
+        merged[tick] = tempo
+    return sorted(merged.items())
 
 
 def tick_to_second(tick: int, tempo_map: list[tuple[int, int]], ticks_per_beat: int) -> float:
@@ -76,24 +81,16 @@ def analyze_midi_file(filepath: str) -> dict:
         'tracks': [],
     }
 
-    # テンポ変化を全トラックから収集して加重平均BPMを計算
-    tempo_changes: list[tuple[float, int, float]] = []  # (時間秒, tempo, bpm)
-    current_tempo = 500000
-
-    for track in mid.tracks:
-        current_tick = 0
-        for msg in track:
-            current_tick += msg.time
-            if msg.type == 'set_tempo':
-                time_sec = mido.tick2second(current_tick, mid.ticks_per_beat, current_tempo)
-                current_tempo = msg.tempo
-                current_bpm = mido.tempo2bpm(current_tempo)
-                tempo_changes.append((time_sec, current_tempo, current_bpm))
-
-    if not tempo_changes:
-        tempo_changes.append((0, 500000, 120.0))
-
-    tempo_changes.sort(key=lambda x: x[0])
+    # テンポ変更を累積時間へ正しく変換して、時間加重平均BPMを計算
+    tempo_map = build_tempo_map(mid)
+    tempo_changes = [
+        (
+            tick_to_second(tick, tempo_map, mid.ticks_per_beat),
+            tempo,
+            mido.tempo2bpm(tempo),
+        )
+        for tick, tempo in tempo_map
+    ]
 
     total_time = mid.length
     weighted_bpm_sum = 0.0
@@ -119,14 +116,11 @@ def analyze_midi_file(filepath: str) -> dict:
             'duration': 0,
         }
 
-        current_time = 0
-        track_tempo = 500000
+        current_tick = 0
 
         for msg in track:
-            current_time += msg.time
-            if msg.type == 'set_tempo':
-                track_tempo = msg.tempo
-            elif msg.type == 'track_name':
+            current_tick += msg.time
+            if msg.type == 'track_name':
                 track_info['name'] = msg.name
             elif msg.type == 'program_change':
                 instrument = INSTRUMENT_NAMES.get(msg.program + 1, f"Program {msg.program}")
@@ -135,7 +129,9 @@ def analyze_midi_file(filepath: str) -> dict:
                 track_info['has_notes'] = True
                 track_info['note_count'] += 1
 
-        track_info['duration'] = mido.tick2second(current_time, mid.ticks_per_beat, track_tempo)
+        track_info['duration'] = tick_to_second(
+            current_tick, tempo_map, mid.ticks_per_beat
+        )
         track_info['instruments'] = list(track_info['instruments'])
         info['tracks'].append(track_info)
 
@@ -259,18 +255,20 @@ def convert_to_key_sequence(filepath: str, note_to_key: dict) -> list[dict]:
     events.sort(key=lambda x: x['time'])
 
     key_sequence: list[dict] = []
-    active_notes: set[int] = set()
-    time_groups: defaultdict[float, list] = defaultdict(list)
+    active_notes: Counter[int] = Counter()
 
-    for event in events:
-        time_groups[round(event['time'], 3)].append(event)
-
-    for current_time in sorted(time_groups.keys()):
-        for event in time_groups[current_time]:
+    # 時刻を丸めると短い音の on/off が同一時刻に潰れるため、計算された
+    # float 値そのものが等しいイベントだけをまとめる。
+    for current_time, grouped_events in groupby(events, key=lambda event: event['time']):
+        for event in grouped_events:
             if event['type'] == 'note_on':
-                active_notes.add(event['note'])
+                active_notes[event['note']] += 1
             elif event['type'] == 'note_off':
-                active_notes.discard(event['note'])
+                note = event['note']
+                if active_notes[note] > 1:
+                    active_notes[note] -= 1
+                else:
+                    active_notes.pop(note, None)
 
         if active_notes:
             keys = []
