@@ -138,7 +138,11 @@ def analyze_midi_file(filepath: str) -> dict:
     return info
 
 
-def analyze_midi_range(filepath: str) -> tuple[int, list[str]]:
+def analyze_midi_range(
+    filepath: str,
+    keyboard_min_note: int = KEYBOARD_MIN_NOTE,
+    keyboard_max_note: int = KEYBOARD_MAX_NOTE,
+) -> tuple[int, list[str]]:
     """
     MIDIファイルの音域を分析して最適なオクターブシフト量を計算する。
     返り値: (shift_semitones, log_messages)
@@ -159,7 +163,7 @@ def analyze_midi_range(filepath: str) -> tuple[int, list[str]]:
     min_note = min(all_notes)
     max_note = max(all_notes)
     midi_range = max_note - min_note
-    keyboard_range = KEYBOARD_MAX_NOTE - KEYBOARD_MIN_NOTE  # 24半音
+    keyboard_range = keyboard_max_note - keyboard_min_note
 
     logs.append(
         f"音域分析: 元の範囲 {midi_to_note_name(min_note)}-{midi_to_note_name(max_note)} "
@@ -167,21 +171,21 @@ def analyze_midi_range(filepath: str) -> tuple[int, list[str]]:
     )
 
     midi_center = (min_note + max_note) / 2
-    keyboard_center = (KEYBOARD_MIN_NOTE + KEYBOARD_MAX_NOTE) / 2
+    keyboard_center = (keyboard_min_note + keyboard_max_note) / 2
     shift = round((keyboard_center - midi_center) / 12) * 12
 
     if midi_range > keyboard_range:
         logs.append(
-            f"警告: 曲の音域({midi_range}半音)がキーボード範囲({keyboard_range}半音)を超えています"
+            f"警告: 曲の音域({midi_range}半音)が演奏範囲({keyboard_range}半音)を超えています"
         )
     else:
         shifted_min = min_note + shift
         shifted_max = max_note + shift
-        if shifted_min < KEYBOARD_MIN_NOTE:
-            additional = KEYBOARD_MIN_NOTE - shifted_min
+        if shifted_min < keyboard_min_note:
+            additional = keyboard_min_note - shifted_min
             shift += (additional // 12 + (1 if additional % 12 > 0 else 0)) * 12
-        elif shifted_max > KEYBOARD_MAX_NOTE:
-            additional = shifted_max - KEYBOARD_MAX_NOTE
+        elif shifted_max > keyboard_max_note:
+            additional = shifted_max - keyboard_max_note
             shift -= (additional // 12 + (1 if additional % 12 > 0 else 0)) * 12
 
     final_min = min_note + shift
@@ -190,8 +194,8 @@ def analyze_midi_range(filepath: str) -> tuple[int, list[str]]:
     logs.append(f"オクターブシフト: {shift // 12:+d}オクターブ ({shift:+d}半音)")
     logs.append(f"シフト後の範囲: {midi_to_note_name(final_min)}-{midi_to_note_name(final_max)}")
 
-    out_low = max(0, KEYBOARD_MIN_NOTE - final_min)
-    out_high = max(0, final_max - KEYBOARD_MAX_NOTE)
+    out_low = max(0, keyboard_min_note - final_min)
+    out_high = max(0, final_max - keyboard_max_note)
     if out_low > 0:
         logs.append(f"警告: {out_low}半音が低音側で範囲外です")
     if out_high > 0:
@@ -200,7 +204,9 @@ def analyze_midi_range(filepath: str) -> tuple[int, list[str]]:
     return shift, logs
 
 
-def apply_octave_shift(shift: int) -> tuple[dict, list[str]]:
+def apply_octave_shift(
+    shift: int, base_mapping: dict | None = None
+) -> tuple[dict, list[str]]:
     """
     オクターブシフトを適用した新しいノート→キーのマッピングを返す。
     返り値: (note_to_key, log_messages)
@@ -208,7 +214,8 @@ def apply_octave_shift(shift: int) -> tuple[dict, list[str]]:
     note_to_key: dict[int, str] = {}
     logs: list[str] = []
 
-    for original_note, key in BASE_NOTE_TO_KEY.items():
+    mapping = BASE_NOTE_TO_KEY if base_mapping is None else base_mapping
+    for original_note, key in mapping.items():
         shifted_note = original_note - shift
         if 0 <= shifted_note <= 127:
             note_to_key[shifted_note] = key

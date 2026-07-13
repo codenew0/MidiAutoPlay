@@ -3,7 +3,7 @@
 import time
 import threading
 from collections import Counter
-from pynput.keyboard import Controller
+from pynput.keyboard import Controller, Key, KeyCode
 
 from src.constants import ALL_KEYS
 from src.midi_analyzer import build_raw_events, midi_to_note_name
@@ -85,7 +85,14 @@ class MidiPlayer:
     # ------------------------------------------------------------------
 
     def _release_all_keys(self) -> None:
-        for key in ALL_KEYS:
+        special_keys = [
+            *[KeyCode.from_vk(vk) for vk in range(0x7C, 0x88)],
+            *[KeyCode.from_vk(vk) for vk in range(0x60, 0x6A)],
+            *[KeyCode.from_vk(vk) for vk in (0x6E, 0x6B, 0x6D, 0x6A)],
+            KeyCode.from_vk(0x2D, _flags=1),
+            KeyCode.from_vk(0x0D, _flags=1),
+        ]
+        for key in [*ALL_KEYS, *special_keys, Key.shift, Key.ctrl, Key.space]:
             try:
                 self.keyboard.release(key)
             except Exception:
@@ -102,7 +109,7 @@ class MidiPlayer:
     def _play_sequence(self, midi_file: str, note_to_key: dict,
                        muted_tracks: set, speed: float, key_sequence: list) -> None:
         """バックグラウンドスレッドで実行される再生ループ"""
-        currently_pressed: Counter[str] = Counter()
+        currently_pressed: Counter[object] = Counter()
 
         try:
             all_events = build_raw_events(midi_file, muted_tracks, note_to_key)
@@ -162,7 +169,9 @@ class MidiPlayer:
                 note_name = midi_to_note_name(event['note'])
                 action = self._send_key(event['type'], key, currently_pressed)
 
-                pressed_display = ' + '.join(sorted(currently_pressed.keys())) or 'なし'
+                pressed_display = ' + '.join(
+                    sorted(self._key_label(key) for key in currently_pressed.keys())
+                ) or 'なし'
                 track_info = f"Track{event['track']}"
                 self._emit_status(
                     f"{event['time']:.3f}s | {action} {key}({note_name}) "
@@ -194,23 +203,66 @@ class MidiPlayer:
                 except Exception:
                     pass
 
-    def _send_key(self, event_type: str, key: str,
-                  currently_pressed: Counter[str]) -> str:
+    @staticmethod
+    def _resolve_key(key):
+        if isinstance(key, tuple) and key[0] == 'vk':
+            return KeyCode.from_vk(key[1])
+        if isinstance(key, tuple) and key[0] == 'vk_ext':
+            return KeyCode.from_vk(key[1], _flags=1)
+        return key
+
+    @staticmethod
+    def _key_parts(shortcut) -> tuple:
+        if not isinstance(shortcut, tuple):
+            return (shortcut,)
+        if shortcut[0] in ('vk', 'vk_ext'):
+            return (MidiPlayer._resolve_key(shortcut),)
+        modifier, key = shortcut
+        modifier_keys = {
+            'shift': Key.shift,
+            'ctrl': Key.ctrl,
+            'space': Key.space,
+        }
+        modifier_key = modifier_keys[modifier]
+        return modifier_key, MidiPlayer._resolve_key(key)
+
+    @staticmethod
+    def _key_label(key) -> str:
+        if key == Key.shift:
+            return 'Shift'
+        if key == Key.ctrl:
+            return 'Ctrl'
+        if key == Key.space:
+            return 'Space'
+        return str(key)
+
+    def _send_key(self, event_type: str, key,
+                  currently_pressed: Counter[object]) -> str:
         """キーを送信して現在の押下セットを更新。アクション名を返す。"""
+        parts = self._key_parts(key)
+        modifier = parts[0] if len(parts) > 1 else None
+        normal_key = parts[-1]
+
         if event_type == 'press':
-            if currently_pressed[key] == 0:
-                self.keyboard.press(key)
-                action = "PRESS"
-            else:
-                action = "ALREADY PRESSED"
-            currently_pressed[key] += 1
-            return action
+            if currently_pressed[normal_key] == 0:
+                # 修飾キーはショートカットの keydown を発生させる瞬間だけ
+                # 押す。音の長さだけ保持すると、同時に鳴る通常キーまで
+                # Shift/Space付きとして送られてしまう。
+                if modifier is not None:
+                    self.keyboard.press(modifier)
+                try:
+                    self.keyboard.press(normal_key)
+                finally:
+                    if modifier is not None:
+                        self.keyboard.release(modifier)
+            currently_pressed[normal_key] += 1
+            return "PRESS"
         else:  # release
-            if currently_pressed[key] > 1:
-                currently_pressed[key] -= 1
+            if currently_pressed[normal_key] > 1:
+                currently_pressed[normal_key] -= 1
                 return "STILL PRESSED"
-            if currently_pressed[key] == 1:
-                self.keyboard.release(key)
-                currently_pressed.pop(key, None)
+            if currently_pressed[normal_key] == 1:
+                self.keyboard.release(normal_key)
+                currently_pressed.pop(normal_key, None)
                 return "RELEASE"
             return "ALREADY RELEASED"

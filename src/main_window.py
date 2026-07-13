@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from pynput.keyboard import GlobalHotKeys
 
-from src.constants import BASE_NOTE_TO_KEY, ALL_KEYS
+from src.constants import BASE_NOTE_TO_KEY, PLAY_MODES
 from src.midi_analyzer import (
     analyze_midi_file, analyze_midi_range, apply_octave_shift,
     convert_to_key_sequence, midi_to_note_name,
@@ -23,7 +23,7 @@ class MidiPlayerUI:
         self.root.title("MIDI to Keys Player")
 
         # ウィンドウを画面中央に配置
-        w, h = 600, 800
+        w, h = 650, 880
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         self.root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
@@ -34,6 +34,7 @@ class MidiPlayerUI:
         self.midi_info: dict | None = None
         self.key_sequence: list = []
         self.note_to_key: dict = BASE_NOTE_TO_KEY.copy()
+        self.play_mode = tk.StringVar(value='ffxiv')
         self.muted_tracks: set = set()
         self.current_shift: int = 0
         self._speed_resume_id = None
@@ -116,13 +117,25 @@ class MidiPlayerUI:
         ttk.Button(file_frame, text="フォルダ選択",
                    command=self.browse_folder).grid(row=0, column=2, padx=(0, 5))
 
+        # 演奏モード
+        mode_frame = ttk.LabelFrame(main_frame, text="演奏モード", padding="10")
+        mode_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        ttk.Radiobutton(
+            mode_frame, text="FFXIVモード (C3-C6 / 37キー)",
+            variable=self.play_mode, value='ffxiv', command=self.on_mode_change,
+        ).grid(row=0, column=0, sticky=tk.W, padx=(0, 20))
+        ttk.Radiobutton(
+            mode_frame, text="フルパワーモード (A0-C8 / 88キー)",
+            variable=self.play_mode, value='full', command=self.on_mode_change,
+        ).grid(row=0, column=1, sticky=tk.W)
+
         # 音域設定
         tr_frame = ttk.LabelFrame(main_frame, text="音域設定", padding="10")
-        tr_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        tr_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         self.auto_transpose = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            tr_frame, text="キーボード範囲(C4-C7)に自動調整",
+            tr_frame, text="選択モードの音域に自動調整",
             variable=self.auto_transpose, command=self.on_transpose_toggle,
         ).grid(row=0, column=0, sticky=tk.W, padx=(0, 20))
 
@@ -141,7 +154,7 @@ class MidiPlayerUI:
 
         # プレイリスト
         pl_frame = ttk.LabelFrame(main_frame, text="プレイリスト", padding="10")
-        pl_frame.grid(row=2, column=0, columnspan=2,
+        pl_frame.grid(row=3, column=0, columnspan=2,
                       sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
 
         self.playlist_tree = ttk.Treeview(pl_frame, columns=('status',), height=6)
@@ -169,7 +182,7 @@ class MidiPlayerUI:
 
         # MIDI情報
         info_frame = ttk.LabelFrame(main_frame, text="MIDI情報", padding="10")
-        info_frame.grid(row=3, column=0, columnspan=2,
+        info_frame.grid(row=4, column=0, columnspan=2,
                         sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
 
         self.info_text = scrolledtext.ScrolledText(info_frame, height=6, width=80, wrap=tk.WORD)
@@ -202,7 +215,7 @@ class MidiPlayerUI:
             text="再生コントロール (Ctrl+Alt+P=再生/停止, Ctrl+Alt+S=リセット, Ctrl+←/→=前/次)",
             padding="10",
         )
-        ctrl_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        ctrl_frame.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         self.play_btn = ttk.Button(ctrl_frame, text="▶ PLAY",
                                    command=self.toggle_play, state='disabled')
@@ -235,7 +248,7 @@ class MidiPlayerUI:
 
         # ステータスログ
         status_frame = ttk.Frame(main_frame)
-        status_frame.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        status_frame.grid(row=6, column=0, columnspan=2, sticky=(tk.W, tk.E))
         self.status_text = scrolledtext.ScrolledText(
             status_frame, height=8, width=80, wrap=tk.WORD
         )
@@ -301,6 +314,20 @@ class MidiPlayerUI:
     # MIDI解析
     # ------------------------------------------------------------------
 
+    def _base_mapping(self) -> dict:
+        return PLAY_MODES[self.play_mode.get()]
+
+    def on_mode_change(self) -> None:
+        """演奏モードを切り替え、選択中のMIDIを新しい範囲で再解析する。"""
+        was_playing = self.player.is_playing
+        self.player.stop_and_release()
+        mode_name = 'FFXIVモード' if self.play_mode.get() == 'ffxiv' else 'フルパワーモード'
+        self.log(f"演奏モードを {mode_name} に変更しました。")
+        if self.midi_file:
+            self.analyze_file()
+            if was_playing and self.key_sequence:
+                self._start()
+
     def analyze_file(self) -> None:
         """現在の midi_file を解析してUIを更新"""
         if not self.midi_file:
@@ -314,9 +341,14 @@ class MidiPlayerUI:
 
         try:
             self.log("MIDIファイルを解析中...")
+            base_mapping = self._base_mapping()
+            range_min = min(base_mapping)
+            range_max = max(base_mapping)
 
             if self.auto_transpose.get():
-                shift, logs = analyze_midi_range(self.midi_file)
+                shift, logs = analyze_midi_range(
+                    self.midi_file, range_min, range_max
+                )
                 for msg in logs:
                     self.log(msg)
                 self.current_shift = shift
@@ -325,7 +357,7 @@ class MidiPlayerUI:
                 self.current_shift = 0
                 self.log("元のメジャーで再生します（シフトなし）")
 
-            self.note_to_key, map_logs = apply_octave_shift(shift)
+            self.note_to_key, map_logs = apply_octave_shift(shift, base_mapping)
             for msg in map_logs:
                 self.log(msg)
 
@@ -358,7 +390,9 @@ class MidiPlayerUI:
         self.log(f"手動シフト: {self.current_shift // 12:+d}オクターブ ({self.current_shift:+d}半音)")
         if self.midi_file:
             self.auto_transpose.set(False)
-            self.note_to_key, logs = apply_octave_shift(self.current_shift)
+            self.note_to_key, logs = apply_octave_shift(
+                self.current_shift, self._base_mapping()
+            )
             for msg in logs:
                 self.log(msg)
             self.key_sequence = convert_to_key_sequence(self.midi_file, self.note_to_key)
@@ -372,7 +406,7 @@ class MidiPlayerUI:
             if self.auto_transpose.get():
                 self.analyze_file()
             else:
-                self.note_to_key, _ = apply_octave_shift(0)
+                self.note_to_key, _ = apply_octave_shift(0, self._base_mapping())
                 self.key_sequence = convert_to_key_sequence(self.midi_file, self.note_to_key)
                 self._update_transpose_status()
 
@@ -739,7 +773,8 @@ class MidiPlayerUI:
             f"トラック数: {self.midi_info['track_count']}\n"
             f"時間分解能: {self.midi_info['ticks_per_beat']} ticks/beat\n"
             f"キーイベント数: {len(self.key_sequence)}\n"
-            f"対応音域: {note_range} (C4-C7キーボード)\n"
+            f"対応音域: {note_range} "
+            f"({'FFXIVモード' if self.play_mode.get() == 'ffxiv' else 'フルパワーモード'})\n"
         )
         self.info_text.delete(1.0, tk.END)
         self.info_text.insert(1.0, text)
@@ -777,11 +812,7 @@ class MidiPlayerUI:
     # ------------------------------------------------------------------
 
     def _release_all_keys(self) -> None:
-        for key in ALL_KEYS:
-            try:
-                self.player.keyboard.release(key)
-            except Exception:
-                pass
+        self.player._release_all_keys()
 
     def log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")

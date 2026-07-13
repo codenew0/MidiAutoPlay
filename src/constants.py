@@ -1,8 +1,8 @@
 # constants.py - キーマッピングと定数定義
 
 # キーボード範囲の設定（MIDI番号）
-KEYBOARD_MIN_NOTE = 60  # C4 (FF14の最低音)
-KEYBOARD_MAX_NOTE = 84  # C7 (FF14の最高音)
+KEYBOARD_MIN_NOTE = 48  # C3 (FFXIVモードの最低音)
+KEYBOARD_MAX_NOTE = 84  # C6 (FFXIVモードの最高音)
 
 # 基本的なキーマッピング（C4-C7の範囲、37キー）
 BASE_NOTE_TO_KEY = {
@@ -17,6 +17,37 @@ BASE_NOTE_TO_KEY = {
     # C6-C7 (72-84) - オクターブ5-6の高音域
     72: 'g', 73: 'h', 74: 'j', 75: 'k', 76: 'l', 77: 'z', 78: 'x',
     79: 'c', 80: 'v', 81: 'b', 82: 'n', 83: 'm', 84: ',',
+}
+
+# piano フォルダと同じ拡張ショートカット。
+# ('vk', n) はWindows仮想キー、('vk_ext', n) は拡張仮想キー、
+# ('ctrl', key) はCtrlとの同時押しを表す。
+_FUNCTION_KEYS = [('vk', vk) for vk in range(0x7C, 0x88)]  # F13-F24
+_NUMPAD_KEYS = [
+    *[('vk', vk) for vk in range(0x60, 0x6A)],  # Num0-Num9
+    ('vk', 0x6E),  # Decimal
+    ('vk', 0x6B),  # Add
+    ('vk', 0x6D),  # Subtract
+    ('vk', 0x6A),  # Multiply
+    ('vk_ext', 0x2D),  # Insert（B2）
+]
+_LOW_KEYS = [*_FUNCTION_KEYS, *_NUMPAD_KEYS]
+_HIGH_KEYS = [
+    *_FUNCTION_KEYS,
+    *[('vk', vk) for vk in range(0x60, 0x6A)],
+    ('vk', 0x6E),       # Decimal
+    ('vk_ext', 0x0D),   # Numpad Enter
+]
+
+FULL_POWER_NOTE_TO_KEY = {
+    **{21 + i: key for i, key in enumerate(_LOW_KEYS)},
+    **BASE_NOTE_TO_KEY,
+    **{85 + i: ('ctrl', key) for i, key in enumerate(_HIGH_KEYS)},
+}
+
+PLAY_MODES = {
+    'ffxiv': BASE_NOTE_TO_KEY,
+    'full': FULL_POWER_NOTE_TO_KEY,
 }
 
 # MIDI番号から音名への変換
